@@ -1,0 +1,34 @@
+[project]
+name = "agent-workflow"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "ProudRykar", email = "proudrykar@mail.ru" }
+]
+requires-python = ">=3.12.8"
+dependencies = [
+    "httpx>=0.28.1",
+    "prompt-toolkit>=3.0.53",
+    "rich>=15.0.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.10,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "core"
+module-root = "src"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[project.scripts]
+agentoflow = "cli.main:main"
