@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+import json
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
@@ -23,17 +27,11 @@ class OllamaClient(LLMClient):
         messages: list[dict[str, Any]],
         tools: tuple[ToolDefinition, ...] = (),
     ) -> LLMResponse:
-        payload: dict[str, Any] = {
-            "model": self._model,
-            "messages": messages,
-            "stream": False,
-        }
-
-        if tools:
-            payload["tools"] = [
-                self._tool_to_ollama(tool)
-                for tool in tools
-            ]
+        payload = self._build_payload(
+            messages=messages,
+            tools=tools,
+            stream=False,
+        )
 
         async with httpx.AsyncClient(
             timeout=self._timeout,
@@ -46,19 +44,74 @@ class OllamaClient(LLMClient):
         response.raise_for_status()
 
         data = response.json()
-
         message = data["message"]
 
         tool_calls = tuple(
-            self._parse_tool_call(tool_call)
-            for tool_call in message.get("tool_calls", [])
+            self._parse_tool_call(
+                tool_call,
+            )
+            for tool_call in message.get(
+                "tool_calls",
+                [],
+            )
         )
 
         return LLMResponse(
             content=message.get("content"),
+            thinking=message.get("thinking"),
             tool_calls=tool_calls,
             raw=data,
         )
+
+    async def chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: tuple[ToolDefinition, ...] = (),
+    ) -> AsyncIterator[dict[str, Any]]:
+        payload = self._build_payload(
+            messages=messages,
+            tools=tools,
+            stream=True,
+        )
+
+        async with httpx.AsyncClient(
+            timeout=self._timeout,
+        ) as client:
+            async with client.stream(
+                "POST",
+                f"{self._base_url}/api/chat",
+                json=payload,
+            ) as response:
+                response.raise_for_status()
+
+                async for line in response.aiter_lines():
+                    if not line:
+                        continue
+
+                    data = json.loads(line)
+
+                    yield data
+
+    def _build_payload(
+        self,
+        messages: list[dict[str, Any]],
+        tools: tuple[ToolDefinition, ...],
+        stream: bool,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": self._model,
+            "messages": messages,
+            "stream": stream,
+            "think": True,
+        }
+
+        if tools:
+            payload["tools"] = [
+                self._tool_to_ollama(tool)
+                for tool in tools
+            ]
+
+        return payload
 
     @staticmethod
     def _tool_to_ollama(
@@ -82,5 +135,16 @@ class OllamaClient(LLMClient):
         return LLMToolCall(
             id=tool_call.get("id", ""),
             name=function["name"],
-            arguments=function.get("arguments", {}),
+            arguments=function.get(
+                "arguments",
+                {},
+            ),
+        )
+
+    @staticmethod
+    def parse_stream_tool_call(
+        tool_call: dict[str, Any],
+    ) -> LLMToolCall:
+        return OllamaClient._parse_tool_call(
+            tool_call,
         )

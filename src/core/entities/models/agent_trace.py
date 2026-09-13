@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Any
 
@@ -15,9 +17,22 @@ class LLMRequested:
 
 
 @dataclass(slots=True, frozen=True)
+class LLMThinkingChunk:
+    iteration: int
+    content: str
+
+
+@dataclass(slots=True, frozen=True)
+class LLMContentChunk:
+    iteration: int
+    content: str
+
+
+@dataclass(slots=True, frozen=True)
 class LLMResponded:
     iteration: int
     content: str | None
+    thinking: str | None
     tool_call_count: int
 
 
@@ -36,6 +51,7 @@ class ToolFinished:
     tool_name: str
     output: str | None
     error_code: str | None
+    error_message: str | None
 
 
 @dataclass(slots=True, frozen=True)
@@ -46,6 +62,8 @@ class AgentFinished:
 AgentEvent = (
     AgentStarted
     | LLMRequested
+    | LLMThinkingChunk
+    | LLMContentChunk
     | LLMResponded
     | ToolStarted
     | ToolFinished

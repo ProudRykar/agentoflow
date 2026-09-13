@@ -1,7 +1,7 @@
 from typing import Any
 
 from core.entities.models.context_policy import ContextPolicy
-
+from core.entities.models.system_prompt import SYSTEM_PROMPT
 
 class ContextManager:
     def __init__(
@@ -53,7 +53,13 @@ class ContextManager:
         self.add_message(message)
 
     def messages(self) -> list[dict[str, Any]]:
-        return list(self._messages)
+        return [
+            {
+                "role": "system",
+                "content": SYSTEM_PROMPT,
+            },
+            *self._messages,
+        ]
 
     def _trim(self) -> None:
         max_messages = self._policy.max_messages

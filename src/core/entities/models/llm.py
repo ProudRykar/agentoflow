@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Any
 
@@ -12,5 +14,6 @@ class LLMToolCall:
 @dataclass(slots=True, frozen=True)
 class LLMResponse:
     content: str | None
+    thinking: str | None
     tool_calls: tuple[LLMToolCall, ...]
     raw: dict[str, Any]

@@ -65,6 +65,11 @@ def print_event(event: AgentEvent) -> None:
     elif isinstance(event, ToolFinished):
         if event.error_code is not None:
             print(f"[tool] error: {event.error_code}")
+
+            if event.error_message:
+                print(
+                    f"[tool] message: {event.error_message}"
+                )
         else:
             print(f"[tool] output: {event.output}")
 
@@ -108,6 +113,8 @@ async def main() -> None:
                     "edit_file",
                     "remember",
                     "recall",
+                    "execute_shell",
+                    "web_fetch",
                 }),
             ),
             PathGuardrail(
@@ -154,6 +161,8 @@ async def main() -> None:
             "memory.read",
             "memory.write",
             "edit_file",
+            "shell.execute",
+            "shell.network",
         }),
     )
 

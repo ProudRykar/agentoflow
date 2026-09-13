@@ -1,4 +1,6 @@
-from collections.abc import Awaitable, Callable, Sequence
+from __future__ import annotations
+
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from typing import Any
 
 from core.entities.models.agent_hook import AgentHook
@@ -6,11 +8,14 @@ from core.entities.models.agent_trace import (
     AgentEvent,
     AgentFinished,
     AgentStarted,
+    LLMContentChunk,
     LLMRequested,
     LLMResponded,
+    LLMThinkingChunk,
     ToolFinished,
     ToolStarted,
 )
+from core.entities.models.approval import ApprovalDeniedError
 from core.entities.models.context_manager import ContextManager
 from core.entities.models.guardrail_error import GuardrailDeniedError
 from core.entities.models.llm import LLMResponse, LLMToolCall
@@ -25,7 +30,10 @@ from core.entities.models.tool_registry import ToolRegistry
 from core.entities.models.tool_result import ToolError, ToolResult
 
 
-EventCallback = Callable[[AgentEvent], Awaitable[None]]
+EventCallback = Callable[
+    [AgentEvent],
+    Awaitable[None],
+]
 
 
 class Agent:
@@ -43,12 +51,15 @@ class Agent:
         self._registry = registry
         self._executor = executor
         self._definition_builder = (
-            definition_builder or ToolDefinitionBuilder()
+            definition_builder
+            or ToolDefinitionBuilder()
         )
         self._max_iterations = max_iterations
         self._hooks = tuple(hooks)
-        self._context_manager = context_manager or ContextManager()
-        
+        self._context_manager = (
+            context_manager
+            or ContextManager()
+        )
 
     async def _emit(
         self,
@@ -115,11 +126,15 @@ class Agent:
         on_event: EventCallback | None = None,
     ) -> str:
         await self._emit(
-            AgentStarted(prompt=prompt),
+            AgentStarted(
+                prompt=prompt,
+            ),
             on_event,
         )
 
-        self._context_manager.create(prompt)
+        self._context_manager.create(
+            prompt,
+        )
 
         return await self._run_loop(
             context=context,
@@ -133,11 +148,15 @@ class Agent:
         on_event: EventCallback | None = None,
     ) -> str:
         await self._emit(
-            AgentStarted(prompt=prompt),
+            AgentStarted(
+                prompt=prompt,
+            ),
             on_event,
         )
 
-        self._context_manager.add_user_message(prompt)
+        self._context_manager.add_user_message(
+            prompt,
+        )
 
         return await self._run_loop(
             context=context,
@@ -157,7 +176,10 @@ class Agent:
             for tool in self._registry.all()
         )
 
-        for iteration in range(1, self._max_iterations + 1):
+        for iteration in range(
+            1,
+            self._max_iterations + 1,
+        ):
             messages = self._context_manager.messages()
 
             await self._emit(
@@ -175,18 +197,11 @@ class Agent:
                 tools=tools,
             )
 
-            response = await self._llm.chat(
+            response = await self._stream_llm(
+                iteration=iteration,
                 messages=messages,
                 tools=tools,
-            )
-
-            await self._emit(
-                LLMResponded(
-                    iteration=iteration,
-                    content=response.content,
-                    tool_call_count=len(response.tool_calls),
-                ),
-                on_event,
+                on_event=on_event,
             )
 
             await self._after_llm(
@@ -198,14 +213,18 @@ class Agent:
                 result = response.content or ""
 
                 await self._emit(
-                    AgentFinished(result=result),
+                    AgentFinished(
+                        result=result,
+                    ),
                     on_event,
                 )
 
                 return result
 
             self._context_manager.add_assistant_message(
-                self._assistant_message(response)
+                self._assistant_message(
+                    response,
+                ),
             )
 
             for tool_call in response.tool_calls:
@@ -231,7 +250,15 @@ class Agent:
                             message=str(exc),
                             code="guardrail_denied",
                             retryable=False,
-                        )
+                        ),
+                    )
+                except ApprovalDeniedError as exc:
+                    result = ToolResult(
+                        error=ToolError(
+                            message=str(exc),
+                            code="approval_denied",
+                            retryable=False,
+                        ),
                     )
                 else:
                     result = await self._executor.execute(
@@ -254,7 +281,12 @@ class Agent:
                         output=result.output,
                         error_code=(
                             result.error.code
-                            if result.error is not None
+                            if result.error
+                            else None
+                        ),
+                        error_message=(
+                            result.error.message
+                            if result.error
                             else None
                         ),
                     ),
@@ -265,13 +297,130 @@ class Agent:
                     self._tool_message(
                         tool_call_id=tool_call.id,
                         result=result,
-                    )
+                    ),
                 )
 
         raise RuntimeError(
             "Agent exceeded maximum iterations: "
             f"{self._max_iterations}"
         )
+
+    async def _stream_llm(
+        self,
+        iteration: int,
+        messages: list[dict[str, Any]],
+        tools: tuple[ToolDefinition, ...],
+        on_event: EventCallback | None,
+    ) -> LLMResponse:
+        thinking_parts: list[str] = []
+        content_parts: list[str] = []
+
+        tool_calls: dict[str, LLMToolCall] = {}
+        raw_chunks: list[dict[str, Any]] = []
+
+        async for chunk in self._llm.chat_stream(
+            messages=messages,
+            tools=tools,
+        ):
+            raw_chunks.append(chunk)
+
+            message = chunk.get(
+                "message",
+                {},
+            )
+
+            thinking = message.get(
+                "thinking",
+            )
+
+            if thinking:
+                thinking = str(thinking)
+                thinking_parts.append(thinking)
+
+                await self._emit(
+                    LLMThinkingChunk(
+                        iteration=iteration,
+                        content=thinking,
+                    ),
+                    on_event,
+                )
+
+            content = message.get(
+                "content",
+            )
+
+            if content:
+                content = str(content)
+                content_parts.append(content)
+
+                await self._emit(
+                    LLMContentChunk(
+                        iteration=iteration,
+                        content=content,
+                    ),
+                    on_event,
+                )
+
+            for raw_tool_call in message.get(
+                "tool_calls",
+                [],
+            ):
+                parsed = self._llm.parse_stream_tool_call(
+                    raw_tool_call,
+                )
+
+                existing = tool_calls.get(
+                    parsed.id,
+                )
+
+                if existing is None:
+                    tool_calls[parsed.id] = parsed
+                    continue
+
+                tool_calls[parsed.id] = LLMToolCall(
+                    id=existing.id,
+                    name=(
+                        parsed.name
+                        or existing.name
+                    ),
+                    arguments={
+                        **existing.arguments,
+                        **parsed.arguments,
+                    },
+                )
+
+            if chunk.get(
+                "done",
+                False,
+            ):
+                break
+
+        response = LLMResponse(
+            content="".join(content_parts) or None,
+            thinking="".join(thinking_parts) or None,
+            tool_calls=tuple(
+                tool_calls.values(),
+            ),
+            raw=(
+                raw_chunks[-1]
+                if raw_chunks
+                else {}
+            ),
+        )
+
+        await self._emit(
+            LLMResponded(
+                iteration=iteration,
+                content=response.content,
+                thinking=response.thinking,
+                tool_call_count=len(
+                    response.tool_calls,
+                ),
+            ),
+            on_event,
+        )
+
+        return response
 
     @staticmethod
     def _assistant_message(
@@ -292,7 +441,7 @@ class Agent:
                         "arguments": tool_call.arguments,
                     },
                 }
-                for tool_call in response.tool_calls
+                for tool in response.tool_calls
             ]
 
         return message

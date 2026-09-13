@@ -24,7 +24,7 @@ class ToolContext:
     environment: Mapping[str, str]
     allowed_path: tuple[Path, ...]
     permissions: frozenset[str]
-
+    approved_permissions: frozenset[str] = frozenset()
 
 @dataclass(slots=True, frozen=True)
 class ToolResult:

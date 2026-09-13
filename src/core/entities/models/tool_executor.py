@@ -8,7 +8,7 @@ from core.entities.models.arguments import (
 from core.entities.models.tool import ToolContext, Tool
 from core.entities.models.tool_registry import ToolRegistry
 from core.entities.models.tool_result import ToolError, ToolResult
-
+from core.entities.models.builtin.execute_shell import ShellCommandError
 
 class ToolExecutor:
     def __init__(
@@ -83,6 +83,15 @@ class ToolExecutor:
                 )
             )
         
+        except ShellCommandError as exc:
+            return ToolResult(
+                error=ToolError(
+                    message=str(exc),
+                    code="command_failed",
+                    retryable=True,
+                ),
+            )
+        
         except Exception as exc:
             return ToolResult(
                 error=ToolError(
@@ -94,7 +103,7 @@ class ToolExecutor:
         
 
         output_text = str(output)
-        
+
         if len(output_text) > tool.policy.max_output_size:
             return ToolResult(
                 error=ToolError(
@@ -111,7 +120,12 @@ class ToolExecutor:
         return ToolResult(output=output_text)
 
     def _check_permissions(self, tool: Tool[Any, Any], context: ToolContext) -> None:
-        missing = tool.policy.permissions - context.permissions
+        available_permissions = (
+            context.permissions
+            | context.approved_permissions
+        )
+
+        missing = tool.policy.permissions - available_permissions
 
         if missing:
             raise PermissionError(
