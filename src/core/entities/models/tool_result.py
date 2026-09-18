@@ -1,14 +1,6 @@
-from dataclasses import dataclass
+from core.entities.models.tool import ToolError, ToolResult
 
-
-@dataclass(slots=True, frozen=True)
-class ToolError:
-    message: str
-    code: str
-    retryable: bool
-
-
-@dataclass(slots=True, frozen=True)
-class ToolResult:
-    output: str | None = None
-    error: ToolError | None = None
+__all__ = [
+    "ToolError",
+    "ToolResult",
+]

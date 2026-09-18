@@ -91,6 +91,7 @@ def create_runtime(
                     "recall",
                     "execute_shell",
                     "web_fetch",
+                    "web_crawl"
                 }),
             ),
             PathGuardrail(

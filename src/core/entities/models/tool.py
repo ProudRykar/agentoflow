@@ -1,15 +1,13 @@
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from collections.abc import Callable, Awaitable
 from enum import StrEnum
 from pathlib import Path
-from typing import Generic, Mapping, TypeVar
+from typing import Generic, TypeVar
 
-# Переменные:
+
 InputT = TypeVar("InputT")
 OutputT = TypeVar("OutputT")
-type ToolHandler[InputT, OutputT] = Callable[
-    [InputT, ToolContext], Awaitable[OutputT]
-]
+
 
 @dataclass(slots=True, frozen=True)
 class ToolError:
@@ -25,6 +23,23 @@ class ToolContext:
     allowed_path: tuple[Path, ...]
     permissions: frozenset[str]
     approved_permissions: frozenset[str] = frozenset()
+
+    run_id: str = ""
+    parent_run_id: str | None = None
+
+    # Callback для потоковой передачи событий Agent наружу.
+    # Используется, в частности, для отображения событий дочерних
+    # subagent'ов в UI.
+    event_callback: (
+        Callable[[object], Awaitable[None]] | None
+    ) = None
+
+
+type ToolHandler[InputT, OutputT] = Callable[
+    [InputT, ToolContext],
+    Awaitable[OutputT],
+]
+
 
 @dataclass(slots=True, frozen=True)
 class ToolResult:

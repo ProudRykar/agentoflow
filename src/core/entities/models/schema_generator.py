@@ -1,5 +1,7 @@
 from dataclasses import MISSING, fields, is_dataclass
-from typing import get_type_hints
+from enum import Enum
+from types import UnionType
+from typing import Union, get_args, get_origin, get_type_hints
 
 from core.entities.models.tool import InputT
 
@@ -44,7 +46,30 @@ class SchemaGenerator:
     def _type_to_schema(
         self,
         field_type: type,
-    ) -> dict[str, str]:
+    ) -> dict[str, object]:
+        origin = get_origin(field_type)
+
+        if origin in (Union, UnionType):
+            args = get_args(field_type)
+
+            non_none_types = tuple(
+                arg for arg in args if arg is not type(None)
+            )
+
+            if len(non_none_types) == 1 and len(args) == 2:
+                schema = self._type_to_schema(non_none_types[0])
+                schema["nullable"] = True
+                return schema
+
+        if origin is tuple:
+            args = get_args(field_type)
+
+            if len(args) == 2 and args[1] is Ellipsis:
+                return {
+                    "type": "array",
+                    "items": self._type_to_schema(args[0]),
+                }
+
         if field_type is str:
             return {"type": "string"}
 
@@ -56,6 +81,12 @@ class SchemaGenerator:
 
         if field_type is bool:
             return {"type": "boolean"}
+
+        if isinstance(field_type, type) and issubclass(field_type, Enum):
+            return {
+                "type": "string",
+                "enum": [member.value for member in field_type],
+            }
 
         raise TypeError(
             f"Unsupported field type: {field_type}"

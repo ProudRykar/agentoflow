@@ -44,15 +44,8 @@ def config_path_command() -> None:
     print(paths.config)
 
 
-def config_show_command() -> None:
-    paths = AgentWorkflowPaths()
-    paths.ensure()
-
-    print(
-        paths.config.read_text(
-            encoding="utf-8",
-        ),
-    )
+def test_command() -> None:
+    print("Running tests...")
 
 
 async def chat_agent() -> None:

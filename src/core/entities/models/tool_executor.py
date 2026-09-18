@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 from typing import Any
 
@@ -5,10 +7,13 @@ from core.entities.models.arguments import (
     ArgumentDecoder,
     ArgumentDecoderError,
 )
-from core.entities.models.tool import ToolContext, Tool
+from core.entities.models.builtin.execute_shell import (
+    ShellCommandError,
+)
+from core.entities.models.tool import Tool, ToolContext
 from core.entities.models.tool_registry import ToolRegistry
 from core.entities.models.tool_result import ToolError, ToolResult
-from core.entities.models.builtin.execute_shell import ShellCommandError
+
 
 class ToolExecutor:
     def __init__(
@@ -17,7 +22,10 @@ class ToolExecutor:
         argument_decoder: ArgumentDecoder | None = None,
     ) -> None:
         self._registry = registry
-        self._argument_decoder = argument_decoder or ArgumentDecoder()
+        self._argument_decoder = (
+            argument_decoder
+            or ArgumentDecoder()
+        )
 
     async def execute(
         self,
@@ -25,35 +33,39 @@ class ToolExecutor:
         arguments: dict[str, Any],
         context: ToolContext,
     ) -> ToolResult:
-        
         try:
-            tool = self._registry.get(tool_name)
+            tool = self._registry.get(
+                tool_name,
+            )
         except Exception as exc:
             return ToolResult(
                 error=ToolError(
                     message=str(exc),
                     code="tool_not_found",
                     retryable=False,
-                )
+                ),
             )
-        
-        
+
         try:
-            self._check_permissions(tool, context)
+            self._check_permissions(
+                tool,
+                context,
+            )
         except PermissionError as exc:
             return ToolResult(
                 error=ToolError(
                     message=str(exc),
                     code="permission_denied",
                     retryable=False,
-                )
+                ),
             )
-        
 
         try:
-            decoded_arguments = self._argument_decoder.decode(
-                arguments,
-                tool.input_type,
+            decoded_arguments = (
+                self._argument_decoder.decode(
+                    arguments,
+                    tool.input_type,
+                )
             )
         except ArgumentDecoderError as exc:
             return ToolResult(
@@ -61,13 +73,15 @@ class ToolExecutor:
                     message=str(exc),
                     code=exc.code,
                     retryable=False,
-                )
+                ),
             )
-        
 
         try:
             output = await asyncio.wait_for(
-                tool.handler(decoded_arguments, context),
+                tool.handler(
+                    decoded_arguments,
+                    context,
+                ),
                 timeout=tool.policy.timeout,
             )
 
@@ -80,9 +94,9 @@ class ToolExecutor:
                     ),
                     code="timeout",
                     retryable=True,
-                )
+                ),
             )
-        
+
         except ShellCommandError as exc:
             return ToolResult(
                 error=ToolError(
@@ -91,16 +105,15 @@ class ToolExecutor:
                     retryable=True,
                 ),
             )
-        
+
         except Exception as exc:
             return ToolResult(
                 error=ToolError(
                     message=str(exc),
                     code="execution_error",
                     retryable=True,
-                )
+                ),
             )
-        
 
         output_text = str(output)
 
@@ -114,20 +127,30 @@ class ToolExecutor:
                     ),
                     code="output_too_large",
                     retryable=False,
-                )
+                ),
             )
 
-        return ToolResult(output=output_text)
+        return ToolResult(
+            output=output_text,
+        )
 
-    def _check_permissions(self, tool: Tool[Any, Any], context: ToolContext) -> None:
+    @staticmethod
+    def _check_permissions(
+        tool: Tool[Any, Any],
+        context: ToolContext,
+    ) -> None:
         available_permissions = (
             context.permissions
             | context.approved_permissions
         )
 
-        missing = tool.policy.permissions - available_permissions
+        missing = (
+            tool.policy.permissions
+            - available_permissions
+        )
 
         if missing:
             raise PermissionError(
-                f"Missing permissions: {', '.join(sorted(missing))}"
+                "Missing permissions: "
+                + ", ".join(sorted(missing))
             )

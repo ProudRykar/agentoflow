@@ -148,3 +148,37 @@ class OllamaClient(LLMClient):
         return OllamaClient._parse_tool_call(
             tool_call,
         )
+
+    async def load(self) -> None:
+        async with httpx.AsyncClient(
+            timeout=self._timeout,
+        ) as client:
+            response = await client.post(
+                f"{self._base_url}/api/generate",
+                json={
+                    "model": self._model,
+                    "prompt": "",
+                    "stream": False,
+                    "keep_alive": -1,
+                },
+            )
+
+        response.raise_for_status()
+
+    async def unload(self) -> None:
+        async with httpx.AsyncClient(
+            timeout=self._timeout,
+        ) as client:
+            response = await client.post(
+                f"{self._base_url}/api/generate",
+                json={
+                    "model": self._model,
+                    "prompt": "",
+                    "stream": False,
+                    "keep_alive": 0,
+                },
+            )
+
+        response.raise_for_status()
+
+    

@@ -3,7 +3,6 @@ import argparse
 from cli.commands import (
     chat_command,
     config_path_command,
-    config_show_command,
     run_command,
     version_command,
 )
@@ -87,7 +86,7 @@ def main() -> None:
             return
 
         if args.config_command == "show":
-            config_show_command()
+            config_path_command()
             return
 
     if args.command == "run":
