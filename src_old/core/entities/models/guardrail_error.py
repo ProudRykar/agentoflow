@@ -1,2 +1,0 @@
-class GuardrailDeniedError(Exception):
-    pass
