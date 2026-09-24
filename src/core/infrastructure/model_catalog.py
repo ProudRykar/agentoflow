@@ -203,6 +203,16 @@ class ModelCatalogLoader:
         if ram_gb is not None:
             ram_gb = float(ram_gb)
 
+        thinking = requirements_data.get(
+            "thinking",
+            False,
+        )
+
+        if not isinstance(thinking, bool):
+            raise ValueError(
+                "Thinking must be a boolean"
+            )
+
         return ModelProfile(
             name=name,
             description=description,
@@ -216,6 +226,7 @@ class ModelCatalogLoader:
                 context_size=context_size,
                 vram_gb=vram_gb,
                 ram_gb=ram_gb,
+                thinking=thinking,
             ),
         )
 

@@ -23,11 +23,20 @@ class SubagentConfig:
     max_iterations: int = 5
     max_tool_calls: int = 10
     timeout: float = 600.0
+    escalation: bool = False
+
+
+@dataclass(slots=True, frozen=True)
+class ModelsConfig:
+    catalog: str = "models.toml"
+    vram_budget_gb: float | None = None
+    single_model_mode: bool = False
 
 
 @dataclass(slots=True, frozen=True)
 class ContextConfig:
     max_messages: int | None = 4
+    token_estimation_divisor: int = 4
 
 
 @dataclass(slots=True, frozen=True)
@@ -42,6 +51,7 @@ class Config:
     subagent: SubagentConfig
     context: ContextConfig
     memory: MemoryConfig
+    models: ModelsConfig
 
 
 class ConfigLoader:
@@ -74,6 +84,11 @@ class ConfigLoader:
 
         memory_data = data.get(
             "memory",
+            {},
+        )
+
+        models_data = data.get(
+            "models",
             {},
         )
 
@@ -111,10 +126,18 @@ class ConfigLoader:
                     "timeout",
                     600.0,
                 ),
+                escalation=subagent_data.get(
+                    "escalation",
+                    False,
+                ),
             ),
             context=ContextConfig(
                 max_messages=context_data.get(
                     "max_messages",
+                    4,
+                ),
+                token_estimation_divisor=context_data.get(
+                    "token_estimation_divisor",
                     4,
                 ),
             ),
@@ -122,6 +145,19 @@ class ConfigLoader:
                 database=memory_data.get(
                     "database",
                     "memory.db",
+                ),
+            ),
+            models=ModelsConfig(
+                catalog=models_data.get(
+                    "catalog",
+                    "models.toml",
+                ),
+                vram_budget_gb=models_data.get(
+                    "vram_budget_gb",
+                ),
+                single_model_mode=models_data.get(
+                    "single_model_mode",
+                    False,
                 ),
             ),
         )

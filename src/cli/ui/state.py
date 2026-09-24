@@ -4,11 +4,86 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from core.entities.models.research_contract import ResearchResult
+
 
 class ToolStatus(str, Enum):
     RUNNING = "running"
     SUCCESS = "success"
     ERROR = "error"
+
+
+# UI memory bounds: views keep a head for instant render.
+# Full bodies live in HistoryStore (and EvidenceStore for
+# research); RAM-heavy blobs are evicted from the view.
+TOOL_OUTPUT_PREVIEW_CHARS = 2_000
+TOOL_OUTPUT_KEEP_CHARS = 8_000
+TOOL_OUTPUT_COLLAPSED_CHARS = 500
+
+
+def store_tool_output(
+    output: str | None,
+) -> tuple[str | None, bool, int]:
+    """Split tool output for UI memory.
+
+    Returns (kept, evicted, full_length): kept is the full
+    output when small, else a preview head.
+    """
+
+    if not output:
+        return None, False, 0
+
+    if len(output) <= TOOL_OUTPUT_KEEP_CHARS:
+        return output, False, len(output)
+
+    return (
+        output[:TOOL_OUTPUT_PREVIEW_CHARS],
+        True,
+        len(output),
+    )
+
+
+def research_summary(
+    output: str | None,
+) -> str | None:
+    """Compact card for research JSON blobs, if parseable.
+
+    Tries to extract the first valid JSON object from the output
+    to handle cases where extra text was appended.
+    """
+
+    if not output:
+        return None
+
+    result = ResearchResult.from_json(output)
+
+    if result is None:
+        # Try to extract the first valid JSON object
+        import re
+
+        match = re.search(r"\{.*\}", output, re.DOTALL)
+
+        while match:
+            try:
+                result = ResearchResult.from_json(match.group())
+
+                if result is not None:
+                    break
+            except (ValueError, TypeError):
+                pass
+
+            # Try to find a shorter match
+            match = re.search(r"\{.*?\}", match.group()[1:], re.DOTALL)
+
+        if result is None:
+            return None
+
+    return (
+        f"research: {len(result.pages)} page(s), "
+        f"{result.total_bytes} bytes, "
+        f"depth {result.max_depth_reached}, "
+        f"failed {len(result.failed_urls)}"
+    )
 
 
 @dataclass(slots=True, frozen=True)
@@ -35,6 +110,10 @@ class ToolView:
     arguments: dict[str, Any]
     status: ToolStatus = ToolStatus.RUNNING
     output: str | None = None
+    output_evicted: bool = False
+    output_full_length: int = 0
+    research_summary: str | None = None
+    duration_seconds: float | None = None
     error_code: str | None = None
     error_message: str | None = None
     expanded: bool = False
@@ -52,6 +131,10 @@ ConversationItem = (
 class AgentRunView:
     run_id: str
     parent_run_id: str | None
+
+    model: str | None = None
+    agent_id: str = "main"
+    role: str = "main"
 
     conversation: list[ConversationItem] = field(
         default_factory=list,
@@ -75,11 +158,9 @@ class AgentRunView:
         self.assistant_streaming = False
         self.assistant_streamed_current = False
 
-        self.conversation.append(
-            ThinkingView(
-                iteration=iteration,
-            ),
-        )
+        # The view is created lazily by append_thinking: models
+        # without thinking output must not leave an empty
+        # "Thinking…" panel behind.
 
     def append_thinking(
         self,
@@ -92,8 +173,18 @@ class AgentRunView:
             if not isinstance(item, ThinkingView):
                 continue
 
+            if item.iteration != self.iteration:
+                break
+
             item.content += content
             return
+
+        self.conversation.append(
+            ThinkingView(
+                iteration=self.iteration,
+                content=content,
+            ),
+        )
 
     def stop_thinking(self) -> None:
         self.thinking = False
@@ -174,6 +265,7 @@ class AgentRunView:
         output: str | None,
         error_code: str | None,
         error_message: str | None,
+        duration_seconds: float | None = None,
     ) -> None:
         for item in reversed(self.conversation):
             if not isinstance(item, ToolView):
@@ -188,7 +280,15 @@ class AgentRunView:
                 else ToolStatus.ERROR
             )
 
-            item.output = output
+            kept, evicted, full_length = store_tool_output(
+                output,
+            )
+
+            item.output = kept
+            item.output_evicted = evicted
+            item.output_full_length = full_length
+            item.research_summary = research_summary(output)
+            item.duration_seconds = duration_seconds
             item.error_code = error_code
             item.error_message = error_message
 
@@ -240,6 +340,9 @@ class UIState:
     running: bool = False
     first_message: bool = True
 
+    estimated_tokens: int | None = None
+    model_context_size: int | None = None
+
     assistant_streaming: bool = False
     assistant_streamed_current: bool = False
 
@@ -247,16 +350,32 @@ class UIState:
         self,
         run_id: str,
         parent_run_id: str | None,
+        model: str | None = None,
+        agent_id: str = "main",
+        role: str = "main",
     ) -> AgentRunView:
         run = self.runs.get(run_id)
 
         if run is not None:
             run.running = True
+
+            if model:
+                run.model = model
+
+            if agent_id != "main":
+                run.agent_id = agent_id
+
+            if role != "main":
+                run.role = role
+
             return run
 
         run = AgentRunView(
             run_id=run_id,
             parent_run_id=parent_run_id,
+            model=model,
+            agent_id=agent_id,
+            role=role,
         )
 
         self.runs[run_id] = run
@@ -315,11 +434,9 @@ class UIState:
         self.assistant_streaming = False
         self.assistant_streamed_current = False
 
-        self.conversation.append(
-            ThinkingView(
-                iteration=iteration,
-            ),
-        )
+        # The view is created lazily by append_thinking: models
+        # without thinking output must not leave an empty
+        # "Thinking…" panel behind.
 
     def append_thinking(
         self,
@@ -332,8 +449,18 @@ class UIState:
             if not isinstance(item, ThinkingView):
                 continue
 
+            if item.iteration != self.iteration:
+                break
+
             item.content += content
             return
+
+        self.conversation.append(
+            ThinkingView(
+                iteration=self.iteration,
+                content=content,
+            ),
+        )
 
     def stop_thinking(self) -> None:
         self.thinking = False
@@ -414,6 +541,7 @@ class UIState:
         output: str | None,
         error_code: str | None,
         error_message: str | None,
+        duration_seconds: float | None = None,
     ) -> None:
         for item in reversed(self.conversation):
             if not isinstance(item, ToolView):
@@ -428,7 +556,15 @@ class UIState:
                 else ToolStatus.ERROR
             )
 
-            item.output = output
+            kept, evicted, full_length = store_tool_output(
+                output,
+            )
+
+            item.output = kept
+            item.output_evicted = evicted
+            item.output_full_length = full_length
+            item.research_summary = research_summary(output)
+            item.duration_seconds = duration_seconds
             item.error_code = error_code
             item.error_message = error_message
 

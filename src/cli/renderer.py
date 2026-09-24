@@ -31,9 +31,11 @@ class Renderer:
         self,
         console: Console | None = None,
         verbose: bool = False,
+        model_name: str = "agent",
     ) -> None:
         self._console = console or Console()
         self._verbose = verbose
+        self._model_name = model_name
         self._state = UIState()
 
     @property
@@ -221,7 +223,7 @@ class Renderer:
             self._console.print(
                 Group(
                     Text(
-                        "Gemma",
+                        self._model_name,
                         style="bold",
                     ),
                     Markdown(item.content),

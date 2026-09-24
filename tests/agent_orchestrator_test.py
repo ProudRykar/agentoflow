@@ -9,51 +9,70 @@ from core.entities.models.agent_phase import AgentPhase
 def test_agent_starts_in_planning() -> None:
     orchestrator = AgentOrchestrator()
 
-    transition = orchestrator.on_agent_started()
+    transition = orchestrator.on_agent_started("test task")
 
+    # The run passes through PLANNING and lands on the first
+    # plan step (execution for a prompt without research).
     assert transition == (
-        AgentPhase.IDLE,
         AgentPhase.PLANNING,
-        "agent run started",
+        AgentPhase.EXECUTION,
+        "initial plan step activated: execution",
     )
 
     assert orchestrator.state.started is True
-    assert orchestrator.state.phase is AgentPhase.PLANNING
+    assert orchestrator.state.phase is AgentPhase.EXECUTION
 
 
 def test_web_tool_enters_research() -> None:
-    orchestrator = AgentOrchestrator()
+    from core.entities.models.planner import Planner
+    from core.entities.models.task_contract import TaskContract
 
-    orchestrator.on_agent_started()
+    prompt = "Research https://example.com documentation"
+    task_plan = Planner().plan(prompt)
+
+    orchestrator = AgentOrchestrator()
+    orchestrator.prepare_task(
+        task_plan,
+        TaskContract(
+            requires_research=True,
+            research=task_plan.research,
+        ),
+        prompt=prompt,
+    )
+    orchestrator.on_agent_started(prompt)
+
+    assert orchestrator.state.phase is AgentPhase.RESEARCH
 
     transition = orchestrator.on_tool_started(
         "web_fetch",
     )
 
-    assert transition is not None
-    assert transition[0] is AgentPhase.PLANNING
-    assert transition[1] is AgentPhase.RESEARCH
+    # Already in the research step phase: no transition needed.
+    assert transition is None
+    assert orchestrator.state.phase is AgentPhase.RESEARCH
     assert orchestrator.state.tool_calls == 1
 
 
 def test_regular_tool_enters_execution() -> None:
     orchestrator = AgentOrchestrator()
 
-    orchestrator.on_agent_started()
+    orchestrator.on_agent_started("test task")
 
     transition = orchestrator.on_tool_started(
         "read_file",
     )
 
-    assert transition is not None
-    assert transition[0] is AgentPhase.PLANNING
-    assert transition[1] is AgentPhase.EXECUTION
+    # Already in the execution step phase: no transition needed.
+    assert transition is None
+    assert orchestrator.state.phase is AgentPhase.EXECUTION
+    assert orchestrator.state.tool_calls == 1
+    assert orchestrator.state.last_tool_name == "read_file"
 
 
 def test_failed_tool_enters_debugging() -> None:
     orchestrator = AgentOrchestrator()
 
-    orchestrator.on_agent_started()
+    orchestrator.on_agent_started("test task")
     orchestrator.on_tool_started("read_file")
 
     transition = orchestrator.on_tool_finished(
@@ -71,7 +90,7 @@ def test_failed_tool_enters_debugging() -> None:
 def test_candidate_completion_goes_through_synthesis() -> None:
     orchestrator = AgentOrchestrator()
 
-    orchestrator.on_agent_started()
+    orchestrator.on_agent_started("test task")
 
     synthesis = orchestrator.begin_synthesis()
 
@@ -89,7 +108,7 @@ def test_candidate_completion_goes_through_synthesis() -> None:
 def test_completed_run_cannot_continue_without_reset() -> None:
     orchestrator = AgentOrchestrator()
 
-    orchestrator.on_agent_started()
+    orchestrator.on_agent_started("test task")
     orchestrator.begin_synthesis()
     orchestrator.complete()
 
@@ -106,7 +125,7 @@ def test_completed_run_cannot_continue_without_reset() -> None:
 def test_new_run_resets_previous_state() -> None:
     orchestrator = AgentOrchestrator()
 
-    orchestrator.on_agent_started()
+    orchestrator.on_agent_started("test task")
     orchestrator.on_tool_started("web_fetch")
     orchestrator.on_tool_finished(
         error_code="execution_error",
@@ -114,9 +133,9 @@ def test_new_run_resets_previous_state() -> None:
     )
     orchestrator.begin_reflection()
 
-    orchestrator.on_agent_started()
+    orchestrator.on_agent_started("test task")
 
-    assert orchestrator.state.phase is AgentPhase.PLANNING
+    assert orchestrator.state.phase is AgentPhase.EXECUTION
     assert orchestrator.state.iteration == 0
     assert orchestrator.state.tool_calls == 0
     assert orchestrator.state.last_tool_name is None

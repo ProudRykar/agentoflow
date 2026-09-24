@@ -11,6 +11,7 @@ from core.entities.models.agent_trace import AgentEvent, ToolStarted
 from core.entities.models.model_router import ModelRouter
 from core.entities.models.subagent import (
     AgentRun,
+    SubagentPower,
     SubagentResult,
     SubagentStatus,
     SubagentTask,
@@ -52,7 +53,96 @@ class SubagentManager:
         parent_context: ToolContext,
         on_event: EventCallback | None = None,
     ) -> SubagentResult:
-    
+        effective_task = self._apply_defaults(task)
+
+        model, result = await self._execute_once(
+            effective_task,
+            parent_run_id=parent_run_id,
+            parent_context=parent_context,
+            on_event=on_event,
+        )
+
+        if (
+            self._config.escalation
+            and result.status
+            in (
+                SubagentStatus.FAILED,
+                SubagentStatus.TIMEOUT,
+            )
+        ):
+            escalated = self._escalated_task(
+                effective_task,
+                model,
+            )
+
+            if escalated is not None:
+                try:
+                    preview = self._model_router.select(
+                        escalated,
+                    )
+                except Exception:
+                    preview = model
+
+                # A higher tier resolving to the same model
+                # means there is nothing stronger to try.
+                if preview != model:
+                    _, result = await self._execute_once(
+                        escalated,
+                        parent_run_id=parent_run_id,
+                        parent_context=parent_context,
+                        on_event=on_event,
+                    )
+
+        return result
+
+    def _escalated_task(
+        self,
+        task: SubagentTask,
+        model: str,
+    ) -> SubagentTask | None:
+        """One step up the power ladder, at most once."""
+
+        base: SubagentPower | None = None
+
+        power_for = getattr(
+            self._model_router,
+            "power_for",
+            None,
+        )
+
+        if callable(power_for):
+            try:
+                base = power_for(model)
+            except Exception:
+                base = None
+
+        if base is None:
+            base = task.profile.power
+
+        next_power = {
+            SubagentPower.LOW: SubagentPower.MEDIUM,
+            SubagentPower.MEDIUM: SubagentPower.HIGH,
+        }.get(base)
+
+        if next_power is None:
+            return None
+
+        return replace(
+            task,
+            profile=replace(
+                task.profile,
+                power=next_power,
+            ),
+        )
+
+    async def _execute_once(
+        self,
+        task: SubagentTask,
+        *,
+        parent_run_id: str,
+        parent_context: ToolContext,
+        on_event: EventCallback | None = None,
+    ) -> tuple[str, SubagentResult]:
         started_at = time.monotonic()
         run_id = self._new_run_id()
 
@@ -135,16 +225,19 @@ class SubagentManager:
                     )
 
         except asyncio.TimeoutError:
-            return self._build_result(
-                run_id=run_id,
-                parent_run_id=parent_run_id,
-                status=SubagentStatus.TIMEOUT,
-                started_at=started_at,
-                iterations=iterations,
-                tool_calls=tool_calls,
-                error=(
-                    "Subagent timed out after "
-                    f"{timeout} seconds"
+            return (
+                model,
+                self._build_result(
+                    run_id=run_id,
+                    parent_run_id=parent_run_id,
+                    status=SubagentStatus.TIMEOUT,
+                    started_at=started_at,
+                    iterations=iterations,
+                    tool_calls=tool_calls,
+                    error=(
+                        "Subagent timed out after "
+                        f"{timeout} seconds"
+                    ),
                 ),
             )
 
@@ -152,24 +245,30 @@ class SubagentManager:
             raise
 
         except Exception as exc:
-            return self._build_result(
+            return (
+                model,
+                self._build_result(
+                    run_id=run_id,
+                    parent_run_id=parent_run_id,
+                    status=SubagentStatus.FAILED,
+                    started_at=started_at,
+                    iterations=iterations,
+                    tool_calls=tool_calls,
+                    error=str(exc),
+                ),
+            )
+
+        return (
+            model,
+            self._build_result(
                 run_id=run_id,
                 parent_run_id=parent_run_id,
-                status=SubagentStatus.FAILED,
+                status=SubagentStatus.COMPLETED,
                 started_at=started_at,
                 iterations=iterations,
                 tool_calls=tool_calls,
-                error=str(exc),
-            )
-
-        return self._build_result(
-            run_id=run_id,
-            parent_run_id=parent_run_id,
-            status=SubagentStatus.COMPLETED,
-            started_at=started_at,
-            iterations=iterations,
-            tool_calls=tool_calls,
-            output=output,
+                output=output,
+            ),
         )
 
     def _apply_defaults(

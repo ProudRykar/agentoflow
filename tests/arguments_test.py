@@ -62,6 +62,30 @@ def test_decode_unknown_field(
 
     assert error.code == "unknown_field"
     assert error.field == "unknown"
+    assert "path" in str(error)
+
+
+def test_decode_envelope_is_unwrapped(
+    decoder: ArgumentDecoder,
+) -> None:
+    result = decoder.decode(
+        {"properties": {"path": "src/main.py"}},
+        ReadFileInput,
+    )
+
+    assert result == ReadFileInput(path="src/main.py")
+
+
+def test_decode_nested_envelope_stays_error(
+    decoder: ArgumentDecoder,
+) -> None:
+    with pytest.raises(ArgumentDecoderError) as exc_info:
+        decoder.decode(
+            {"properties": {"properties": {"path": "x"}}},
+            ReadFileInput,
+        )
+
+    assert exc_info.value.code == "unknown_field"
 
 
 def test_decode_default_field(

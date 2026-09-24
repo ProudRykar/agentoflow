@@ -30,6 +30,7 @@ class ModelRequirements:
     context_size: int | None = None
     vram_gb: float | None = None
     ram_gb: float | None = None
+    thinking: bool = False
 
 
 @dataclass(slots=True, frozen=True)
@@ -115,6 +116,20 @@ class ModelCatalog:
                 "Quality: "
                 f"{model.attributes.quality}/5"
             )
+
+            parts.append(
+                "Resource usage: "
+                f"{model.attributes.resource_usage}/5 "
+                "(1-2=low tier, 3=medium, 4-5=heavy; "
+                "high power picks the best of 3+, heavy "
+                "models may force a VRAM model swap)"
+            )
+
+            if model.requirements.vram_gb is not None:
+                parts.append(
+                    "VRAM: "
+                    f"{model.requirements.vram_gb:g} GB"
+                )
 
             if model.requirements.context_size is not None:
                 parts.append(

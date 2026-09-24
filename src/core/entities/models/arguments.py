@@ -26,6 +26,13 @@ class ArgumentDecoderError(Exception):
         self.actual = actual
 
 
+_ARGUMENT_ENVELOPES = frozenset({
+    "properties",
+    "parameters",
+    "arguments",
+})
+
+
 class ArgumentDecoderErrorFactory:
     @staticmethod
     def invalid_type(
@@ -55,9 +62,17 @@ class ArgumentDecoderErrorFactory:
     @staticmethod
     def unknown_field(
         field: str,
+        valid: tuple[str, ...] = (),
     ) -> ArgumentDecoderError:
+        message = f"Unknown field '{field}'"
+
+        if valid:
+            message += (
+                ". Valid fields: " + ", ".join(sorted(valid))
+            )
+
         return ArgumentDecoderError(
-            f"Unknown field '{field}'",
+            message,
             code="unknown_field",
             field=field,
         )
@@ -75,6 +90,18 @@ class ArgumentDecoder:
                 code="invalid_input_type",
             )
 
+        # Some models wrap arguments in a single envelope
+        # object (OpenAI-style "properties"). Unwrap exactly
+        # one level; deeper nesting stays an error.
+        if len(data) == 1:
+            sole = next(iter(data))
+
+            if sole in _ARGUMENT_ENVELOPES and isinstance(
+                data[sole],
+                dict,
+            ):
+                data = data[sole]
+
         input_fields = fields(input_type)
         field_names = {
             field.name
@@ -85,6 +112,7 @@ class ArgumentDecoder:
             if name not in field_names:
                 raise ArgumentDecoderErrorFactory.unknown_field(
                     name,
+                    valid=tuple(sorted(field_names)),
                 )
 
         hints = get_type_hints(input_type)

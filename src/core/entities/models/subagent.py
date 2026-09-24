@@ -22,6 +22,19 @@ class TaskComplexity(StrEnum):
     COMPLEX = "complex"
 
 
+class SubagentPower(StrEnum):
+    """Explicit compute tier chosen by the caller (or main LLM).
+
+    LOW/MEDIUM/HIGH map onto ModelProfile.resource_usage bands
+    1-2 / 3 / 4-5. AUTO leaves the choice to the router.
+    """
+
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    AUTO = "auto"
+
+
 @dataclass(slots=True, frozen=True)
 class AgentRun:
     run_id: str
@@ -40,6 +53,8 @@ class TaskProfile:
     complexity: TaskComplexity = (
         TaskComplexity.MEDIUM
     )
+
+    power: SubagentPower = SubagentPower.AUTO
 
     min_context_tokens: int | None = None
 

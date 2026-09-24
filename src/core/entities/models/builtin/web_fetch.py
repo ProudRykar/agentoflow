@@ -7,6 +7,10 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from trafilatura import extract, extract_metadata
 
+from core.entities.models.research_contract import (
+    ResearchPage,
+    ResearchResult,
+)
 from core.entities.models.tool import ToolContext
 from core.entities.models.web_policy import WebPolicy
 
@@ -33,14 +37,16 @@ ACCEPT_HEADER = (
     "*/*;q=0.1"
 )
 
-ALLOWED_CONTENT_TYPES = frozenset({
-    "text/html",
-    "text/plain",
-    "application/json",
-    "application/xml",
-    "text/xml",
-    "application/xhtml+xml",
-})
+ALLOWED_CONTENT_TYPES = frozenset(
+    {
+        "text/html",
+        "text/plain",
+        "application/json",
+        "application/xml",
+        "text/xml",
+        "application/xhtml+xml",
+    }
+)
 
 
 class _LinkParser(HTMLParser):
@@ -163,7 +169,6 @@ async def _read_response(
             chunks.append(
                 chunk[:remaining],
             )
-
             total += remaining
             truncated = True
             break
@@ -365,7 +370,7 @@ async def web_fetch(
 
                     if redirect_number >= MAX_REDIRECTS:
                         raise ValueError(
-                            f"Too many redirects "
+                            "Too many redirects "
                             f"(maximum {MAX_REDIRECTS})",
                         )
 
@@ -417,7 +422,7 @@ async def web_fetch(
             )
 
             title = ""
-            links: list[tuple[str, str]] = []
+            raw_links: list[tuple[str, str]] = []
 
             if content_type in {
                 "text/html",
@@ -426,7 +431,7 @@ async def web_fetch(
                 (
                     clean_text,
                     title,
-                    links,
+                    raw_links,
                 ) = _extract_html(
                     text,
                     final_url,
@@ -446,47 +451,32 @@ async def web_fetch(
 
                 content_truncated = True
 
-            output_parts = [
-                f"url: {final_url}",
-                f"status: {status_code}",
-                f"content_type: {content_type}",
-            ]
-
-            if response_truncated:
-                output_parts.append(
-                    "response: truncated at "
-                    f"{MAX_RESPONSE_SIZE} bytes",
-                )
-
-            if content_truncated:
-                output_parts.append(
-                    "text: truncated at "
-                    f"{MAX_TEXT_SIZE} characters",
-                )
-
-            if title:
-                output_parts.append(
-                    f"title: {title}",
-                )
-
-            if clean_text:
-                output_parts.append(
-                    f"[content]\n{clean_text}",
-                )
-
-            if links:
-                output_parts.append(
-                    "[links]",
-                )
-
-                output_parts.extend(
-                    f"{label}: {url}"
-                    for label, url in links
-                )
-
-            return "\n".join(
-                output_parts,
+            links = tuple(
+                url
+                for _, url in raw_links
             )
+
+            page = ResearchPage(
+                url=final_url,
+                depth=0,
+                title=title,
+                content=clean_text,
+                links=links,
+                content_bytes=len(body),
+            )
+
+            result = ResearchResult(
+                root_url=final_url,
+                pages=(page,),
+                discovered_urls=links,
+                failed_urls=(),
+                max_depth_reached=0,
+                total_bytes=len(body),
+                page_limit_reached=False,
+                byte_limit_reached=response_truncated,
+            )
+
+            return result.to_json()
 
     raise RuntimeError(
         "Unreachable redirect state",

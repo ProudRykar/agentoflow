@@ -5,6 +5,7 @@ import asyncio
 from cli.approval import ApprovalController
 from cli.ui.app import AgentUI
 from core.application.runtime import create_runtime
+from core.application.subagents import main_model_context_size
 from core.infrastructure.paths import AgentWorkflowPaths
 
 
@@ -58,6 +59,12 @@ async def chat_agent() -> None:
     ui = AgentUI(
         runtime=runtime,
         approval=approval,
+        model_context_size=main_model_context_size(
+            runtime.paths.resolve(
+                runtime.config.models.catalog,
+            ),
+            runtime.config.llm.model,
+        ),
     )
 
     try:

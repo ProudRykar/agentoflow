@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from core.entities.models.model_catalog import ModelCapability
 from core.entities.models.subagent import (
+    SubagentPower,
     SubagentStatus,
     SubagentTask,
     TaskComplexity,
@@ -17,6 +18,96 @@ from core.entities.models.tool import (
     ToolPolicy,
     ToolResult,
 )
+
+
+@dataclass(slots=True, frozen=True)
+class RolePreset:
+    """Defaults for a well-known subagent role.
+
+    Presets only fill fields left at their defaults;
+    explicit call arguments always win.
+    """
+
+    capability: ModelCapability
+    power: SubagentPower
+    tools: tuple[str, ...]
+
+
+ROLE_PRESETS: dict[str, RolePreset] = {
+    "researcher": RolePreset(
+        capability=ModelCapability.RESEARCH,
+        power=SubagentPower.LOW,
+        tools=(
+            "web_fetch",
+            "web_crawl",
+        ),
+    ),
+    "coder": RolePreset(
+        capability=ModelCapability.CODING,
+        power=SubagentPower.MEDIUM,
+        tools=(
+            "read_file",
+            "write_file",
+            "edit_file",
+            "execute_shell",
+        ),
+    ),
+    "reviewer": RolePreset(
+        capability=ModelCapability.GENERAL,
+        power=SubagentPower.MEDIUM,
+        tools=(
+            "read_file",
+            "search_files",
+        ),
+    ),
+}
+
+
+def apply_role_preset(
+    input_data: SubagentRunInput,
+) -> SubagentRunInput:
+    preset = ROLE_PRESETS.get(input_data.role)
+
+    if preset is None:
+        return input_data
+
+    capability = input_data.capability
+    power = input_data.power
+    tools = input_data.tools
+
+    if capability is ModelCapability.GENERAL:
+        capability = preset.capability
+
+    if power is SubagentPower.AUTO:
+        power = preset.power
+
+    if not tools:
+        tools = preset.tools
+
+    if (
+        capability is input_data.capability
+        and power is input_data.power
+        and tools == input_data.tools
+    ):
+        return input_data
+
+    return SubagentRunInput(
+        role=input_data.role,
+        objective=input_data.objective,
+        instructions=input_data.instructions,
+        context=input_data.context,
+        capability=capability,
+        complexity=input_data.complexity,
+        power=power,
+        min_context_tokens=input_data.min_context_tokens,
+        model=input_data.model,
+        tools=tools,
+        permissions=input_data.permissions,
+        max_iterations=input_data.max_iterations,
+        max_tool_calls=input_data.max_tool_calls,
+        max_tokens=input_data.max_tokens,
+        timeout_seconds=input_data.timeout_seconds,
+    )
 
 
 @dataclass(slots=True, frozen=True)
@@ -34,6 +125,8 @@ class SubagentRunInput:
     complexity: TaskComplexity = (
         TaskComplexity.MEDIUM
     )
+
+    power: SubagentPower = SubagentPower.AUTO
 
     min_context_tokens: int | None = None
 
@@ -55,6 +148,8 @@ def create_subagent_tool(
         input_data: SubagentRunInput,
         context: ToolContext,
     ) -> ToolResult:
+        input_data = apply_role_preset(input_data)
+
         task = SubagentTask(
             role=input_data.role,
             objective=input_data.objective,
@@ -64,6 +159,7 @@ def create_subagent_tool(
             profile=TaskProfile(
                 capability=input_data.capability,
                 complexity=input_data.complexity,
+                power=input_data.power,
                 min_context_tokens=(
                     input_data.min_context_tokens
                 ),
@@ -115,7 +211,23 @@ def create_subagent_tool(
             "work. Prefer model='auto' so the system selects "
             "the appropriate model from the configured model "
             "catalog. Specify capability and complexity to "
-            "describe the task requirements. The subagent runs "
+            "describe the task requirements. Choose compute "
+            "power explicitly: power='low' for simple lookups "
+            "and short extracts (cheapest, no VRAM swap), "
+            "power='medium' for ordinary subtasks, power='high' "
+            "for the best available model on hard work (usually "
+            "the strong main model with no swap; a heavier pick "
+            "forces a VRAM model swap, use deliberately). "
+            "power='auto' "
+            "lets the router decide. Known roles carry presets, "
+            "so a bare role is enough: role='researcher' gets "
+            "research capability, low power, and web tools; "
+            "role='coder' gets coding, medium power, and file "
+            "tools; role='reviewer' gets read tools. Explicit "
+            "fields always override presets. Pass arguments "
+            "flat, never nested under a 'properties' object. "
+            "Group similar subtasks so "
+            "they reuse one loaded model. The subagent runs "
             "with isolated context and a limited tool set."
         ),
         input_type=SubagentRunInput,

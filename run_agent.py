@@ -13,6 +13,10 @@ from core.entities.models.agent_trace import (
     ToolFinished,
     ToolStarted,
 )
+from core.application.subagents import build_subagent_stack
+from core.entities.models.builtin.history_tools import (
+    create_history_tool,
+)
 from core.entities.models.builtin.registry import create_builtin_registry
 from core.entities.models.context_manager import ContextManager
 from core.entities.models.guardrail_hook import GuardrailHook
@@ -115,6 +119,8 @@ async def main() -> None:
                     "recall",
                     "execute_shell",
                     "web_fetch",
+                    "recall_history",
+                    "subagent.run",
                 }),
             ),
             PathGuardrail(
@@ -125,6 +131,9 @@ async def main() -> None:
 
     context_policy = ContextPolicy(
         max_messages=config.context.max_messages,
+        token_estimation_divisor=(
+            config.context.token_estimation_divisor
+        ),
     )
 
     context_manager = ContextManager(
@@ -143,6 +152,7 @@ async def main() -> None:
         registry=registry,
         executor=executor,
         context_manager=context_manager,
+        memory=memory,
         max_iterations=config.agent.max_iterations,
         on_event=print_event,
         hooks=(
@@ -150,6 +160,40 @@ async def main() -> None:
             guardrail_hook,
         ),
     )
+
+    def current_task_id() -> str | None:
+        anchor = agent.orchestrator.task_anchor
+
+        if anchor is None:
+            return None
+
+        return anchor.task_id
+
+    registry.register(
+        create_history_tool(
+            current_task_id,
+            agent.controller.history,
+        ),
+    )
+
+    catalog_path = paths.resolve(config.models.catalog)
+
+    if catalog_path.exists():
+        subagents = build_subagent_stack(
+            catalog_path=catalog_path,
+            main_model=config.llm.model,
+            vram_budget_gb=config.models.vram_budget_gb,
+            single_model_mode=config.models.single_model_mode,
+            subagent_config=config.subagent,
+            base_url="http://127.0.0.1:11434",
+            timeout=config.llm.timeout,
+            parent_registry=registry,
+            memory=memory,
+            assembler=agent.assembler,
+            controller=agent.controller,
+        )
+
+        registry.register(subagents.tool)
 
     context = ToolContext(
         working_directory=working_directory,
@@ -160,6 +204,7 @@ async def main() -> None:
             "filesystem.write",
             "memory.read",
             "memory.write",
+            "history.read",
             "edit_file",
             "shell.execute",
             "shell.network",

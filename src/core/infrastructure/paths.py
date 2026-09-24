@@ -27,6 +27,10 @@ class AgentWorkflowPaths:
         return self.home / "config.toml"
 
     @property
+    def models(self) -> Path:
+        return self.home / "models.toml"
+
+    @property
     def memory_database(self) -> Path:
         return self.home / "memory.db"
 

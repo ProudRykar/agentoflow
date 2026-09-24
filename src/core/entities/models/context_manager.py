@@ -61,6 +61,16 @@ class ContextManager:
             *self._messages,
         ]
 
+    def dialogue(self) -> list[dict[str, Any]]:
+        """
+        Raw conversation without the harness system message.
+
+        The ContextAssembler owns system-level blocks; it takes
+        only the dialogue from here.
+        """
+
+        return list(self._messages)
+
     def _trim(self) -> None:
         max_messages = self._policy.max_messages
 

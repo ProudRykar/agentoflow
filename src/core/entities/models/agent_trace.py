@@ -33,6 +33,7 @@ class LLMRequested:
     tool_count: int
     run_id: str = ""
     parent_run_id: str | None = None
+    estimated_tokens: int | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -81,6 +82,7 @@ class ToolFinished:
     error_message: str | None
     run_id: str = ""
     parent_run_id: str | None = None
+    duration_seconds: float | None = None
 
 
 @dataclass(slots=True, frozen=True)
