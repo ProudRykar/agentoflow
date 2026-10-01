@@ -1,5 +1,5 @@
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Generic, TypeVar
@@ -34,6 +34,32 @@ class ToolContext:
         Callable[[object], Awaitable[None]] | None
     ) = None
 
+    # Optional reference to the agent for skill management tools
+    agent: object = None
+
+    # Resources published by plugins during setup, keyed by
+    # plugin name. ToolContext is a slots dataclass, so a
+    # plugin cannot attach its client as an attribute; this
+    # mapping is the supported channel instead.
+    plugin_resources: Mapping[str, Mapping[str, object]] = (
+        field(default_factory=dict)
+    )
+
+    def plugin_resource(
+        self,
+        plugin_name: str,
+        key: str,
+        default: object = None,
+    ) -> object:
+        """Fetch a resource published by a plugin."""
+
+        resources = self.plugin_resources.get(plugin_name)
+
+        if not resources:
+            return default
+
+        return resources.get(key, default)
+
 
 type ToolHandler[InputT, OutputT] = Callable[
     [InputT, ToolContext],
@@ -52,6 +78,11 @@ class ToolPolicy:
     permissions: frozenset[str]
     timeout: float
     max_output_size: int
+
+    # When true, the tool is gated by the approval flow even
+    # if every permission it declares is already granted. This
+    # is how plugins mark destructive operations.
+    requires_approval: bool = False
 
 
 class ToolSource(StrEnum):

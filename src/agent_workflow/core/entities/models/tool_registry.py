@@ -27,6 +27,17 @@ class ToolRegistry:
 
         self._tools[tool.name] = tool
 
+    def unregister(
+        self,
+        name: str,
+    ) -> None:
+        if name not in self._tools:
+            raise ToolRegistryError(
+                f"Tool '{name}' is not registered"
+            )
+
+        del self._tools[name]
+
     def get(
         self,
         name: str,

@@ -29,7 +29,12 @@ from agent_workflow.core.entities.models.guardrails.path_guardrail import (
 )
 from agent_workflow.core.entities.models.memory_manager import MemoryManager
 from agent_workflow.core.entities.models.path_policy import PathPolicy
+from agent_workflow.core.entities.models.plugins.manager import PluginManager
 from agent_workflow.core.entities.models.shell_policy import ShellPolicy
+from agent_workflow.core.entities.models.skills.manager import SkillManager
+from agent_workflow.core.entities.models.skills.registry import SkillRegistry
+from agent_workflow.core.entities.models.skills.tools import create_skills_tools
+from agent_workflow.core.entities.models.plugins.tools import create_plugins_tools
 from agent_workflow.core.entities.models.tool import ToolContext
 from agent_workflow.core.entities.models.tool_executor import ToolExecutor
 from agent_workflow.core.infrastructure.config import Config, ConfigLoader
@@ -51,12 +56,13 @@ class AgentRuntime:
     store: SQLiteStore
     paths: AgentWorkflowPaths
     config: Config
+    plugin_manager: PluginManager
 
     def close(self) -> None:
         self.store.close()
 
 
-def create_runtime(
+async def create_runtime(
     approval_handler: ApprovalHandler,
 ) -> AgentRuntime:
     paths = AgentWorkflowPaths()
@@ -85,25 +91,12 @@ def create_runtime(
         path_policy=path_policy,
     )
 
+    # The allowlist is registry-driven so tools contributed by
+    # plugins are permitted once registered. Everything already
+    # lives in the registry; the guardrail denies unknown names.
     guardrail_hook = GuardrailHook(
         guardrails=(
-            AllowedToolsGuardrail(
-                allowed_tools=frozenset({
-                    "read_file",
-                    "list_directory",
-                    "search_files",
-                    "find_files",
-                    "write_file",
-                    "edit_file",
-                    "remember",
-                    "recall",
-                    "execute_shell",
-                    "web_fetch",
-                    "web_crawl",
-                    "recall_history",
-                    "subagent.run",
-                }),
-            ),
+            AllowedToolsGuardrail(registry=registry),
             PathGuardrail(
                 path_policy=path_policy,
             ),
@@ -142,6 +135,23 @@ def create_runtime(
         timeout=config.llm.timeout,
     )
 
+    # Initialize Skills system
+    skills_directory = paths.home / "skills"
+    skills_directory.mkdir(parents=True, exist_ok=True)
+
+    skill_registry = SkillRegistry()
+    skill_manager = SkillManager(
+        skills_directory=skills_directory,
+        registry=skill_registry,
+    )
+
+    # Initialize Plugin system
+    plugin_manager = PluginManager(
+        tool_registry=registry,
+        skill_registry=skill_registry,
+        skill_manager=skill_manager,
+    )
+
     agent = Agent(
         llm=llm,
         registry=registry,
@@ -156,9 +166,44 @@ def create_runtime(
             ApprovalHook(
                 handler=approval_handler,
                 shell_policy=shell_policy,
+                registry=registry,
             ),
         ),
+        skill_manager=skill_manager,
+        plugin_manager=plugin_manager,
     )
+
+    # Register skills management tools
+    for tool in create_skills_tools():
+        registry.register(tool)
+
+    # Register plugins management tools
+    for tool in create_plugins_tools():
+        registry.register(tool)
+
+    # Initialize plugins (discover, load, initialize) before the
+    # context is built, so plugin tools and resources are part of
+    # the first run.
+    await plugin_manager.discover()
+    await plugin_manager.load_all()
+    await plugin_manager.initialize_all()
+    await plugin_manager.activate_all()
+
+    # Skills and plugins bring their own permissions. They are
+    # granted for the session; mutating tools additionally set
+    # requires_approval and are gated by ApprovalHook.
+    permissions = frozenset({
+        "filesystem.read",
+        "filesystem.write",
+        "memory.read",
+        "memory.write",
+        "history.read",
+        "shell.execute",
+        "web.fetch",
+        "skills.read",
+        "skills.write",
+        "plugins.read",
+    }) | plugin_manager.granted_permissions()
 
     def current_task_id() -> str | None:
         anchor = agent.orchestrator.task_anchor
@@ -197,21 +242,18 @@ def create_runtime(
 
         registry.register(subagents.tool)
 
+    # Pass agent reference and plugin resources to context so
+    # skills tools and plugin tools can reach them.
     context = ToolContext(
         working_directory=working_directory,
         environment=os.environ,
         allowed_path=(working_directory,),
-        permissions=frozenset({
-            "filesystem.read",
-            "filesystem.write",
-            "memory.read",
-            "memory.write",
-            "history.read",
-            "shell.execute",
-            "web.fetch",
-        }),
+        permissions=permissions,
         approved_permissions=frozenset(),
+        plugin_resources=plugin_manager.resources(),
     )
+    # Set agent reference for skills tools
+    context.agent = agent
 
     return AgentRuntime(
         agent=agent,
@@ -219,4 +261,5 @@ def create_runtime(
         store=store,
         paths=paths,
         config=config,
+        plugin_manager=plugin_manager,
     )

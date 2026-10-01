@@ -13,6 +13,7 @@ from agent_workflow.core.entities.models.llm import LLMResponse, LLMToolCall
 from agent_workflow.core.entities.models.shell_policy import ShellPolicy
 from agent_workflow.core.entities.models.tool import ToolContext
 from agent_workflow.core.entities.models.tool_definition import ToolDefinition
+from agent_workflow.core.entities.models.tool_registry import ToolRegistry
 from agent_workflow.core.entities.models.tool_result import ToolResult
 
 
@@ -21,9 +22,11 @@ class ApprovalHook(AgentHook):
         self,
         handler: ApprovalHandler,
         shell_policy: ShellPolicy,
+        registry: ToolRegistry | None = None,
     ) -> None:
         self._handler = handler
         self._shell_policy = shell_policy
+        self._registry = registry
 
     async def before_llm(
         self,
@@ -48,6 +51,7 @@ class ApprovalHook(AgentHook):
     ) -> None:
         permission = self._required_permission(
             tool_call,
+            context,
         )
 
         if permission is None:
@@ -86,6 +90,7 @@ class ApprovalHook(AgentHook):
     def _required_permission(
         self,
         tool_call: LLMToolCall,
+        context: ToolContext,
     ) -> str | None:
         if tool_call.name == "execute_shell":
             command = tool_call.arguments.get("command")
@@ -106,6 +111,42 @@ class ApprovalHook(AgentHook):
 
         if tool_call.name == "web_fetch":
             return "web.network"
+
+        return self._declared_permission(tool_call, context)
+
+    def _declared_permission(
+        self,
+        tool_call: LLMToolCall,
+        context: ToolContext,
+    ) -> str | None:
+        """Permission requested by the tool's own declaration.
+
+        A tool that declares permissions the context does not
+        already hold must be approved before it runs. A tool
+        whose permissions are all granted still asks when it
+        sets ``requires_approval``, using a synthetic
+        permission name derived from the tool name.
+        """
+
+        if self._registry is None:
+            return None
+
+        try:
+            tool = self._registry.get(tool_call.name)
+        except Exception:
+            return None
+
+        policy = tool.policy
+
+        held = context.permissions | context.approved_permissions
+
+        ungranted = sorted(policy.permissions - held)
+
+        if ungranted:
+            return ungranted[0]
+
+        if policy.requires_approval:
+            return f"tool:{tool_call.name}"
 
         return None
 

@@ -85,9 +85,9 @@ class ArgumentDecoder:
         input_type: type[InputT],
     ) -> InputT:
         if not is_dataclass(input_type):
-            raise ArgumentDecoderError(
-                f"{input_type.__name__} must be a dataclass",
-                code="invalid_input_type",
+            return self._decode_opaque(
+                data,
+                input_type,
             )
 
         # Some models wrap arguments in a single envelope
@@ -159,6 +159,93 @@ class ArgumentDecoder:
             decoded[field.name] = value
 
         return input_type(**decoded)
+
+    def _decode_opaque(
+        self,
+        data: dict[str, object],
+        input_type: type[Any],
+    ) -> Any:
+        """Pass-through for non-dataclass input types.
+
+        Plugins may declare opaque inputs. The raw argument
+        mapping is forwarded as ``dict``; primitives are
+        coerced from the first value when the tool expects one.
+        """
+
+        if input_type is Any or input_type is object:
+            return data
+
+        origin = get_origin(input_type)
+
+        if origin in (dict,) or input_type is dict:
+            if not isinstance(data, dict):
+                raise ArgumentDecoderErrorFactory.invalid_type(
+                    field="<input>",
+                    expected="dict",
+                    actual=type(data).__name__,
+                )
+
+            return dict(data)
+
+        if origin is list:
+            values = list(data.values())
+
+            return values
+
+        if input_type in (str, bool, int, float):
+            values = list(data.values())
+
+            if not values:
+                raise ArgumentDecoderErrorFactory.missing_field(
+                    field="<input>",
+                )
+
+            value = values[0]
+
+            if input_type is str:
+                if not isinstance(value, str):
+                    raise ArgumentDecoderErrorFactory.invalid_type(
+                        field="<input>",
+                        expected="str",
+                        actual=type(value).__name__,
+                    )
+
+                return value
+
+            if input_type is bool:
+                if isinstance(value, bool):
+                    return value
+
+                raise ArgumentDecoderErrorFactory.invalid_type(
+                    field="<input>",
+                    expected="bool",
+                    actual=type(value).__name__,
+                )
+
+            if isinstance(value, bool) or not isinstance(
+                value,
+                (int, float, str),
+            ):
+                raise ArgumentDecoderErrorFactory.invalid_type(
+                    field="<input>",
+                    expected=input_type.__name__,
+                    actual=type(value).__name__,
+                )
+
+            try:
+                return input_type(value)
+            except (TypeError, ValueError):
+                raise ArgumentDecoderErrorFactory.invalid_type(
+                    field="<input>",
+                    expected=input_type.__name__,
+                    actual=type(value).__name__,
+                ) from None
+
+        raise ArgumentDecoderError(
+            f"{getattr(input_type, '__name__', input_type)} "
+            "must be a dataclass, dict, or a primitive type",
+            code="invalid_input_type",
+        )
 
     @classmethod
     def _decode_value(

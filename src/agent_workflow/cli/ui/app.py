@@ -553,31 +553,54 @@ class AgentUI(App[None]):
         overflow: hidden;
     }
 
-    /* ===========================================================
+/* ===========================================================
     APPROVAL INFO
     =========================================================== */
 
-    #approval-info {
-        width: 100%;
+#approval-info {
+    width: 100%;
 
-        height: auto;
-        min-height: 0;
+    height: auto;
+    min-height: 0;
 
-        padding: 0 2;
+    padding: 0 2;
 
-        background: #11150f;
+    background: #11150f;
 
-        border-top: solid #28351f;
-        border-bottom: solid #28351f;
+    border-top: solid #28351f;
+    border-bottom: solid #28351f;
 
-        color: #9baa94;
+    color: #9baa94;
 
-        display: none;
-    }
+    display: none;
+}
 
-    /* ===========================================================
-    INPUT
-    =========================================================== */
+/* ===========================================================
+SKILLS
+=========================================================== */
+
+#skills-bar {
+    width: 100%;
+
+    height: auto;
+    min-height: 1;
+    max-height: 6;
+
+    padding: 0 1;
+
+    background: #0d1310;
+
+    border-top: solid #1a2920;
+    border-bottom: solid #1a2920;
+
+    color: #79ad83;
+
+    overflow: hidden;
+}
+
+/* ===========================================================
+INPUT
+=========================================================== */
 
     #input-container {
         width: 100%;
@@ -786,6 +809,7 @@ class AgentUI(App[None]):
 
         self.status_bar: Static | None = None
         self.stage_bar: Static | None = None
+        self.skills_bar: Static | None = None
 
         self.approval_info: Static | None = None
         self.approval_actions: Horizontal | None = None
@@ -829,6 +853,11 @@ class AgentUI(App[None]):
                     yield Static(
                         "",
                         id="stage-bar",
+                    )
+
+                    yield Static(
+                        "",
+                        id="skills-bar",
                     )
 
                 yield Static(
@@ -894,6 +923,11 @@ class AgentUI(App[None]):
             Static,
         )
 
+        self.skills_bar = self.query_one(
+            "#skills-bar",
+            Static,
+        )
+
         self.approval_info = self.query_one(
             "#approval-info",
             Static,
@@ -929,6 +963,7 @@ class AgentUI(App[None]):
         self._render_header()
         self._render_status()
         self._render_stage()
+        self._render_skills()
         self._render_approval()
         self._render_conversation()
 
@@ -1305,6 +1340,76 @@ class AgentUI(App[None]):
         self.stage_bar.update(
             text,
         )
+
+    # ========================================================================
+    # Skills
+    # ========================================================================
+
+    def _render_skills(self) -> None:
+        """Render the skills panel showing available/active/used skills."""
+        if self.skills_bar is None:
+            return
+
+        agent = getattr(self.runtime, "agent", None)
+        if agent is None:
+            self.skills_bar.update(Text(""))
+            return
+
+        skill_manager = getattr(agent, "skill_manager", None)
+        if skill_manager is None:
+            self.skills_bar.update(Text(""))
+            return
+
+        active_skills = skill_manager.active_skills
+        loaded_skills = skill_manager.loaded_skills
+        used_skills = skill_manager.used_skills
+
+        # The registry is already populated by plugin init, so the
+        # available count is readable without awaiting a re-scan.
+        available = skill_manager.registry.list()
+
+        lines: list[Text] = []
+
+        if active_skills:
+            lines.append(Text("Active:", style="#79b982 bold"))
+            for name in active_skills:
+                status = "USED" if name in used_skills else "LOADED"
+                lines.append(
+                    Text.assemble(
+                        ("  ✓ ", "#79b982"),
+                        (name, "#8fc49a"),
+                        (f"  {status}", "#627268"),
+                    )
+                )
+
+        if loaded_skills:
+            other_loaded = [s for s in loaded_skills if s not in active_skills]
+            if other_loaded:
+                lines.append(Text("Loaded:", style="#79ad83 bold"))
+                for name in other_loaded:
+                    lines.append(
+                        Text.assemble(
+                            ("  • ", "#79ad83"),
+                            (name, "#8fc49a"),
+                            ("  LOADED", "#627268"),
+                        )
+                    )
+
+        if available:
+            lines.append(
+                Text(
+                    f"{len(available)} available: "
+                    + ", ".join(
+                        sorted(skill.name for skill in available)
+                    ),
+                    style="#627268",
+                )
+            )
+
+        if not lines:
+            lines.append(Text("No skills available", style="#526158"))
+
+        self.skills_bar.update(Text("\n").join(lines))
 
     def _set_phase(
         self,
@@ -1740,6 +1845,7 @@ class AgentUI(App[None]):
 
         self._render_status()
         self._render_stage()
+        self._render_skills()
         self._render_approval()
 
         if (
@@ -2581,6 +2687,14 @@ class AgentUI(App[None]):
             self._command_help()
             return
 
+        if prompt == "/plugins":
+            self._command_plugins()
+            return
+
+        if prompt.startswith("/plugin "):
+            self._command_plugin_show(prompt[8:].strip())
+            return
+
         task = asyncio.create_task(
             self._run_agent(
                 prompt,
@@ -2639,6 +2753,8 @@ class AgentUI(App[None]):
             "## Commands\n\n"
             "`/help` — show available commands\n\n"
             "`/clear` — clear the conversation\n\n"
+            "`/plugins` — list installed plugins\n\n"
+            "`/plugin <name>` — show plugin details\n\n"
             "`/quit` — exit agentoflow",
         )
 
@@ -2647,6 +2763,130 @@ class AgentUI(App[None]):
         self._invalidate_ui()
 
         self._focus_input()
+
+    def _plugin_manager(self) -> object | None:
+        """Resolve the PluginManager shared by runtime and agent."""
+
+        manager = getattr(self.runtime, "plugin_manager", None)
+
+        if manager is None:
+            manager = getattr(
+                getattr(self.runtime, "agent", None),
+                "plugin_manager",
+                None,
+            )
+
+        return manager
+
+    def _command_plugins(self) -> None:
+        """List all installed plugins."""
+        plugin_manager = self._plugin_manager()
+
+        if plugin_manager is None:
+            self.state.add_assistant_message("Plugin system not available")
+            self._invalidate_ui()
+            self._focus_input()
+            return
+
+        async def run():
+            plugins = plugin_manager.registry.list()
+
+            if not plugins:
+                self.state.add_assistant_message("No plugins installed")
+                self._invalidate_ui()
+                self._focus_input()
+                return
+
+            lines = ["## Installed Plugins\n"]
+            for plugin in plugins:
+                lines.append(f"**{plugin.name}** ({plugin.metadata.version}) - {plugin.state.upper()}")
+                if plugin.metadata.description:
+                    lines.append(f"  {plugin.metadata.description}")
+                if plugin.metadata.capabilities:
+                    caps = ", ".join(plugin.metadata.capabilities)
+                    lines.append(f"  Capabilities: {caps}")
+                lines.append("")
+
+            self.state.add_assistant_message("\n".join(lines))
+            self._invalidate_ui()
+            self._focus_input()
+
+        task = asyncio.create_task(run())
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    def _command_plugin_show(self, name: str) -> None:
+        """Show detailed information about a plugin."""
+        plugin_manager = self._plugin_manager()
+
+        if plugin_manager is None:
+            self.state.add_assistant_message("Plugin system not available")
+            self._invalidate_ui()
+            self._focus_input()
+            return
+
+        async def run():
+            if not plugin_manager.registry.has(name):
+                self.state.add_assistant_message(f"Plugin '{name}' not found")
+                self._invalidate_ui()
+                self._focus_input()
+                return
+
+            plugin = plugin_manager.registry.get(name)
+            meta = plugin.metadata
+
+            lines = [
+                f"## Plugin: {meta.name}",
+                f"**Version:** {meta.version}",
+                f"**Status:** {plugin.state.upper()}",
+            ]
+
+            if meta.description:
+                lines.append(f"\n**Description:** {meta.description}")
+
+            if meta.author:
+                lines.append(f"\n**Author:** {meta.author}")
+
+            if meta.homepage:
+                lines.append(f"\n**Homepage:** {meta.homepage}")
+
+            if meta.license:
+                lines.append(f"\n**License:** {meta.license}")
+
+            if meta.capabilities:
+                lines.append(f"\n**Capabilities:**")
+                for cap in meta.capabilities:
+                    lines.append(f"  - {cap}")
+
+            context = plugin_manager.get_plugin_context(name)
+            if context:
+                if context.registered_tools:
+                    lines.append(f"\n**Tools:**")
+                    for tool in context.registered_tools:
+                        lines.append(f"  - {tool}")
+
+                if context.registered_skills:
+                    lines.append(f"\n**Skills:**")
+                    for skill in context.registered_skills:
+                        lines.append(f"  - {skill}")
+
+                if context._workflows_registry and context._workflows_registry._workflows:
+                    lines.append(f"\n**Workflows:**")
+                    for workflow in context._workflows_registry.list():
+                        lines.append(f"  - {workflow}")
+
+                if context._commands_registry and context._commands_registry._commands:
+                    lines.append(f"\n**Commands:**")
+                    for cmd in context._commands_registry.list():
+                        lines.append(f"  - {cmd}")
+
+            self.state.add_assistant_message("\n".join(lines))
+            self._invalidate_ui()
+            self._focus_input()
+
+        task = asyncio.create_task(run())
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
 
     # ========================================================================
     # Agent execution

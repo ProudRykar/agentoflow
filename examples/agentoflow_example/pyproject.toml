@@ -1,0 +1,16 @@
+[project]
+name = "agentoflow-example"
+version = "0.1.0"
+description = "Example plugin for Agent Workflow"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "agentoflow",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project.entry-points."agentoflow.plugins"]
+example = "agentoflow_example.plugin:ExamplePlugin"

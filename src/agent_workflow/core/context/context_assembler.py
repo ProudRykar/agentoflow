@@ -86,12 +86,15 @@ class ContextAssembler:
         checkpoint: TaskCheckpoint | None = None,
         execution_plan: AgentPlan | None = None,
         tools: tuple[ToolDefinition, ...] = (),
+        skill_instructions: str | None = None,
+        skill_catalog: str | None = None,
+        plugin_catalog: str | None = None,
     ) -> LLMRequestContext:
         """
         Assemble one LLM request.
 
         Fixed order: harness -> anchor -> state -> execution ->
-        checkpoint -> research -> memory -> conversation ->
+        checkpoint -> skills -> research -> memory -> conversation ->
         history -> current instruction. Priorities decide what
         survives when the budget is tight; P0 is non-evictable.
         """
@@ -131,6 +134,27 @@ class ContextAssembler:
             fixed.append(
                 self._system_message(
                     f"[CHECKPOINT]\n{checkpoint.render()}"
+                )
+            )
+
+        if plugin_catalog is not None and plugin_catalog.strip():
+            fixed.append(
+                self._system_message(
+                    f"[{plugin_catalog}]"
+                )
+            )
+
+        if skill_catalog is not None and skill_catalog.strip():
+            fixed.append(
+                self._system_message(
+                    f"[{skill_catalog}]"
+                )
+            )
+
+        if skill_instructions is not None and skill_instructions.strip():
+            fixed.append(
+                self._system_message(
+                    f"[ACTIVE SKILLS]\n{skill_instructions}"
                 )
             )
 

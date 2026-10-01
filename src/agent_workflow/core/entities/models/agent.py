@@ -13,6 +13,8 @@ from agent_workflow.core.context.context_controller import ContextController
 from agent_workflow.core.context.context_item import ContextItem
 from agent_workflow.core.context.evidence import EvidenceReceipt
 from agent_workflow.core.context.history import HistoryKind
+
+
 from agent_workflow.core.context.memory import retrieve_snapshot
 from agent_workflow.core.context.synthesis import build_synthesis_guide
 from agent_workflow.core.entities.models.agent_hook import AgentHook
@@ -54,6 +56,8 @@ from agent_workflow.core.entities.models.tool_definition_builder import (
 )
 from agent_workflow.core.entities.models.tool_executor import ToolExecutor
 from agent_workflow.core.entities.models.tool_registry import ToolRegistry
+from agent_workflow.core.entities.models.plugins.manager import PluginManager
+from agent_workflow.core.entities.models.skills.manager import SkillManager
 
 
 EventCallback = Callable[
@@ -125,6 +129,8 @@ class Agent:
         assembler: ContextAssembler | None = None,
         controller: ContextController | None = None,
         memory: MemoryManager | None = None,
+        skill_manager: SkillManager | None = None,
+        plugin_manager: PluginManager | None = None,
     ) -> None:
         self._llm = llm
         self._registry = registry
@@ -170,6 +176,8 @@ class Agent:
         )
 
         self._memory = memory
+        self._skill_manager = skill_manager
+        self._plugin_manager = plugin_manager
 
     # ==================================================================
     # Properties
@@ -210,6 +218,109 @@ class Agent:
     @property
     def memory(self) -> MemoryManager | None:
         return self._memory
+
+    @property
+    def skill_manager(self) -> SkillManager | None:
+        return self._skill_manager
+
+    @property
+    def plugin_manager(self) -> PluginManager | None:
+        return self._plugin_manager
+
+    async def skill_catalog(self) -> str:
+        """Render the available skills for the system prompt.
+
+        Returns an empty string when no skills exist, so the
+        caller can skip the block entirely.
+        """
+
+        if self._skill_manager is None:
+            return ""
+
+        skills = await self._skill_manager.list_available_metadata()
+
+        if not skills:
+            return ""
+
+        lines = [
+            "AVAILABLE SKILLS:",
+            "",
+            "These skills are registered and can be loaded with "
+            "the skills.load tool. Loading a skill adds its "
+            "instructions to the context. If a skill matches "
+            "the task, load it before acting; if the user asks "
+            "what you can do, read this list rather than "
+            "guessing.",
+            "",
+        ]
+
+        for skill in sorted(
+            skills,
+            key=lambda item: item["name"],
+        ):
+            lines.append(
+                f"- {skill['name']} (v{skill['version']}): "
+                f"{skill['description']}"
+            )
+
+        return "\n".join(lines)
+
+    def plugin_catalog(self) -> str:
+        """Render the connected plugins for the system prompt.
+
+        Skills are enumerated by their own catalog. Plugins need
+        this because their tools are flattened into the request
+        without saying which package supplied them.
+        """
+
+        if self._plugin_manager is None:
+            return ""
+
+        plugins = self._plugin_manager.registry.list()
+
+        if not plugins:
+            return ""
+
+        lines = [
+            "CONNECTED PLUGINS:",
+            "",
+            "These plugins are installed and loaded. A tool "
+            "prefixed with a plugin name comes from that "
+            "plugin. Do not guess a plugin that is absent "
+            "from this list.",
+            "",
+        ]
+
+        for plugin in sorted(
+            plugins,
+            key=lambda item: item.name,
+        ):
+            context = self._plugin_manager.get_plugin_context(
+                plugin.name,
+            )
+
+            tools = (
+                len(context.registered_tools) if context else 0
+            )
+            skills = (
+                len(context.registered_skills) if context else 0
+            )
+
+            detail = plugin.metadata.description or ""
+
+            state = getattr(plugin.state, "value", plugin.state)
+
+            lines.append(
+                f"- {plugin.name} (v{plugin.version}, "
+                f"{state}): {detail} "
+                f"provides {tools} tool(s), {skills} skill(s)"
+            )
+
+            if plugin.metadata.capabilities:
+                caps = ", ".join(plugin.metadata.capabilities)
+                lines.append(f"  capabilities: {caps}")
+
+        return "\n".join(lines)
 
     async def _memory_snapshot(self) -> tuple[ContextItem, ...]:
         if self._memory is None:
@@ -625,6 +736,67 @@ class Agent:
         return tuple(definitions)
 
     # ==================================================================
+    # Skills
+    # ==================================================================
+
+    async def list_skills(self) -> list[dict[str, Any]]:
+        """
+        List available skills with compact metadata.
+
+        Returns metadata only (name, description, version) - not full instructions.
+        """
+        if self._skill_manager is None:
+            return []
+
+        return await self._skill_manager.list_available_metadata()
+
+    async def load_skill(
+        self,
+        name: str,
+    ) -> Skill:
+        """
+        Load and activate a skill by name.
+
+        The skill's full instructions become available in the agent's context
+        for subsequent LLM requests.
+        """
+        if self._skill_manager is None:
+            raise RuntimeError("Skill system not initialized")
+
+        skill = await self._skill_manager.activate(
+            name,
+            run_id=self._run_id,
+            parent_run_id=self._parent_run_id,
+        )
+
+        return skill
+
+    def get_active_skill_instructions(self) -> str:
+        """Get concatenated instructions of all active skills."""
+        if self._skill_manager is None:
+            return ""
+
+        return self._skill_manager.get_active_instructions()
+
+    def is_skill_active(self, name: str) -> bool:
+        """Check if a skill is currently active."""
+        if self._skill_manager is None:
+            return False
+
+        return self._skill_manager.is_active(name)
+
+    def mark_skill_used(self, name: str) -> None:
+        """Mark a skill as used in the current run."""
+        if self._skill_manager is None:
+            return
+
+        self._skill_manager.mark_used(
+            name,
+            run_id=self._run_id,
+            parent_run_id=self._parent_run_id,
+        )
+
+    # ==================================================================
     # Runtime semantic results
     # ==================================================================
 
@@ -778,6 +950,10 @@ class Agent:
 
             memory_snapshot = await self._memory_snapshot()
 
+            skill_catalog = await self.skill_catalog()
+
+            plugin_catalog = self.plugin_catalog()
+
             request = self._assembler.build(
                 anchor=self._orchestrator.task_anchor,
                 task_state=self._orchestrator.task_state,
@@ -801,6 +977,9 @@ class Agent:
                 execution_plan=self._orchestrator.plan,
                 history_selected=history_selected,
                 tools=tools,
+                skill_instructions=self.get_active_skill_instructions(),
+                skill_catalog=skill_catalog,
+                plugin_catalog=plugin_catalog,
             )
 
             # ------------------------------------------------------
@@ -840,6 +1019,9 @@ class Agent:
                     execution_plan=self._orchestrator.plan,
                     history_selected=history_selected,
                     tools=tools,
+                    skill_instructions=self.get_active_skill_instructions(),
+                    skill_catalog=skill_catalog,
+                    plugin_catalog=plugin_catalog,
                 )
 
             messages = request.to_message_list()
