@@ -3,10 +3,10 @@ from typing import Any
 
 import pytest
 
-from cli.approval import ApprovalController
-from cli.ui.app import AgentUI
-from cli.ui.state import UIState
-from core.entities.models.agent_trace import AgentStarted
+from agent_workflow.cli.approval import ApprovalController
+from agent_workflow.cli.ui.app import AgentUI
+from agent_workflow.cli.ui.state import UIState
+from agent_workflow.core.entities.models.agent_trace import AgentStarted
 
 
 def _app() -> AgentUI:

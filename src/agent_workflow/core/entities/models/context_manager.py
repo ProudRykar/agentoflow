@@ -52,6 +52,22 @@ class ContextManager:
     ) -> None:
         self.add_message(message)
 
+    def restore(
+        self,
+        dialogue: list[dict[str, Any]],
+    ) -> None:
+        """Replace the conversation window with persisted turns.
+
+        Used when a session is rehydrated after a restart. The
+        harness system prompt is not part of ``dialogue`` and is
+        added by ``messages()``, so it is deliberately not stored
+        here.
+        """
+
+        self._messages = [dict(item) for item in dialogue]
+
+        self._trim()
+
     def messages(self) -> list[dict[str, Any]]:
         return [
             {
@@ -84,6 +100,37 @@ class ContextManager:
                 break
 
             del self._messages[:len(group)]
+
+        self._drop_orphan_tools()
+
+    def _drop_orphan_tools(self) -> None:
+        """Remove tool results whose assistant block is gone.
+
+        Group trimming removes an assistant together with its tool
+        results, so this should never fire. It is kept as an explicit
+        invariant: a ``tool`` message is invalid to the provider
+        without the ``assistant.tool_calls`` that requested it, and a
+        silent malformed request is far worse than one dropped
+        message.
+        """
+
+        while True:
+            start = 0
+
+            if (
+                self._messages
+                and self._messages[0].get("role") == "system"
+            ):
+                start = 1
+
+            if (
+                start < len(self._messages)
+                and self._messages[start].get("role") == "tool"
+            ):
+                del self._messages[start]
+                continue
+
+            return
 
     def _oldest_message_group(
         self,

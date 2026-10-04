@@ -1,18 +1,18 @@
 import pytest
 
-from core.context.checkpoint import (
+from agent_workflow.core.context.checkpoint import (
     TaskCheckpoint,
     build_checkpoint,
 )
-from core.entities.models.agent_orchestrator import AgentOrchestrator
-from core.entities.models.agent_phase import AgentPhase
-from core.entities.models.planner import Planner
-from core.entities.models.research_contract import (
+from agent_workflow.core.entities.models.agent_orchestrator import AgentOrchestrator
+from agent_workflow.core.entities.models.agent_phase import AgentPhase
+from agent_workflow.core.entities.models.planner import Planner
+from agent_workflow.core.entities.models.research_contract import (
     ResearchContract,
     ResearchPage,
     ResearchResult,
 )
-from core.entities.models.task_contract import TaskContract
+from agent_workflow.core.entities.models.task_contract import TaskContract
 
 
 def _started_orchestrator(
@@ -146,15 +146,25 @@ def test_checkpoint_render_and_roundtrip() -> None:
     assert restored == checkpoint
 
 
-def test_checkpoint_default_cursors_empty() -> None:
+def test_checkpoint_has_no_placeholder_fields() -> None:
+    """decisions/learnings/cursors were serialised but never written.
+
+    They read as "always empty" state, which is worse than absent:
+    a future author would assume something populates them.
+    """
+
     orchestrator = _started_orchestrator()
 
     checkpoint = build_checkpoint(orchestrator)
 
-    assert checkpoint.decisions == ()
-    assert checkpoint.learnings == ()
-    assert checkpoint.conversation_cursor is None
-    assert checkpoint.history_window_id is None
+    for gone in (
+        "decisions",
+        "learnings",
+        "conversation_cursor",
+        "history_window_id",
+    ):
+        assert not hasattr(checkpoint, gone)
+        assert gone not in checkpoint.to_dict()
 
 
 def test_checkpoint_missing_phase_after_block() -> None:

@@ -2,12 +2,12 @@ from pathlib import Path
 
 import pytest
 
-from core.context.history import HistoryKind, InMemoryHistoryStore
-from core.entities.models.builtin.history_tools import (
+from agent_workflow.core.context.history import HistoryKind, InMemoryHistoryStore
+from agent_workflow.core.entities.models.builtin.history_tools import (
     RecallHistoryInput,
     create_history_tool,
 )
-from core.entities.models.tool import ToolContext
+from agent_workflow.core.entities.models.tool import ToolContext
 
 
 def _context(tmp_path: Path) -> ToolContext:

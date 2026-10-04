@@ -2,8 +2,8 @@ from dataclasses import dataclass
 
 import pytest
 
-from core.entities.models.builtin.read_file import ReadFileInput
-from core.entities.models.schema_generator import SchemaGenerator
+from agent_workflow.core.entities.models.builtin.read_file import ReadFileInput
+from agent_workflow.core.entities.models.schema_generator import SchemaGenerator
 
 
 @pytest.fixture

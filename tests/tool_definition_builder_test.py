@@ -1,9 +1,9 @@
 from typing import Any
 
-from core.entities.models.builtin.read_file import ReadFileInput
-from core.entities.models.tool import Tool, ToolPolicy
-from core.entities.models.tool_definition import ToolDefinition
-from core.entities.models.tool_definition_builder import (
+from agent_workflow.core.entities.models.builtin.read_file import ReadFileInput
+from agent_workflow.core.entities.models.tool import Tool, ToolPolicy
+from agent_workflow.core.entities.models.tool_definition import ToolDefinition
+from agent_workflow.core.entities.models.tool_definition_builder import (
     ToolDefinitionBuilder,
 )
 

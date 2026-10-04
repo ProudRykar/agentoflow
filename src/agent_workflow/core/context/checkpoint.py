@@ -19,21 +19,20 @@ class TaskCheckpoint:
     the state. ``objective`` is always copied from the TaskAnchor,
     never invented by a summary.
 
-    decisions/learnings are reserved for later; the first version
-    captures only runtime-owned facts.
+    Only runtime-owned facts are captured. The former
+    ``decisions``/``learnings``/``conversation_cursor``/
+    ``history_window_id`` fields were serialised but never written
+    by anything, so they were dropped rather than left to read as
+    "always empty" state.
     """
 
     task_id: str
     objective: str
     completed_steps: tuple[str, ...] = ()
     active_step: str | None = None
-    decisions: tuple[str, ...] = ()
-    learnings: tuple[str, ...] = ()
     research_evidence_ids: tuple[str, ...] = ()
     missing_requirements: tuple[str, ...] = ()
     next_actions: tuple[str, ...] = ()
-    conversation_cursor: str | None = None
-    history_window_id: str | None = None
 
     def __post_init__(self) -> None:
         if not self.task_id:
@@ -50,16 +49,6 @@ class TaskCheckpoint:
             self,
             "completed_steps",
             tuple(self.completed_steps),
-        )
-        object.__setattr__(
-            self,
-            "decisions",
-            tuple(self.decisions),
-        )
-        object.__setattr__(
-            self,
-            "learnings",
-            tuple(self.learnings),
         )
         object.__setattr__(
             self,
@@ -95,16 +84,6 @@ class TaskCheckpoint:
             f"active step: {self.active_step or '(none)'}"
         )
 
-        if self.decisions:
-            lines.append(
-                "decisions: " + "; ".join(self.decisions)
-            )
-
-        if self.learnings:
-            lines.append(
-                "learnings: " + "; ".join(self.learnings)
-            )
-
         if self.research_evidence_ids:
             lines.append(
                 "evidence: "
@@ -130,8 +109,6 @@ class TaskCheckpoint:
             "objective": self.objective,
             "completed_steps": list(self.completed_steps),
             "active_step": self.active_step,
-            "decisions": list(self.decisions),
-            "learnings": list(self.learnings),
             "research_evidence_ids": list(
                 self.research_evidence_ids
             ),
@@ -139,8 +116,6 @@ class TaskCheckpoint:
                 self.missing_requirements
             ),
             "next_actions": list(self.next_actions),
-            "conversation_cursor": self.conversation_cursor,
-            "history_window_id": self.history_window_id,
         }
 
     @classmethod
@@ -159,13 +134,9 @@ class TaskCheckpoint:
             return tuple(str(item) for item in raw)
 
         active_step = data.get("active_step")
-        cursor = data.get("conversation_cursor")
-        window = data.get("history_window_id")
 
         for name, value in (
             ("active_step", active_step),
-            ("conversation_cursor", cursor),
-            ("history_window_id", window),
         ):
             if value is not None and not isinstance(
                 value,
@@ -180,8 +151,6 @@ class TaskCheckpoint:
             objective=str(data["objective"]),
             completed_steps=_tuple("completed_steps"),
             active_step=active_step,  # type: ignore[arg-type]
-            decisions=_tuple("decisions"),
-            learnings=_tuple("learnings"),
             research_evidence_ids=_tuple(
                 "research_evidence_ids"
             ),
@@ -189,8 +158,6 @@ class TaskCheckpoint:
                 "missing_requirements"
             ),
             next_actions=_tuple("next_actions"),
-            conversation_cursor=cursor,  # type: ignore[arg-type]
-            history_window_id=window,  # type: ignore[arg-type]
         )
 
 

@@ -4,21 +4,21 @@ from typing import Any
 
 import pytest
 
-from core.context.memory import (
+from agent_workflow.core.context.memory import (
     entry_terms,
     memory_to_item,
     query_terms,
     retrieve_snapshot,
 )
-from core.entities.models.agent import Agent
-from core.entities.models.llm import LLMResponse
-from core.entities.models.llm_client import LLMClient
-from core.entities.models.memory import MemoryEntry
-from core.entities.models.memory_manager import MemoryManager
-from core.entities.models.tool import ToolContext
-from core.entities.models.tool_executor import ToolExecutor
-from core.entities.models.tool_registry import ToolRegistry
-from core.infrastructure.in_memory_store import InMemoryStore
+from agent_workflow.core.entities.models.agent import Agent
+from agent_workflow.core.entities.models.llm import LLMResponse
+from agent_workflow.core.entities.models.llm_client import LLMClient
+from agent_workflow.core.entities.models.memory import MemoryEntry
+from agent_workflow.core.entities.models.memory_manager import MemoryManager
+from agent_workflow.core.entities.models.tool import ToolContext
+from agent_workflow.core.entities.models.tool_executor import ToolExecutor
+from agent_workflow.core.entities.models.tool_registry import ToolRegistry
+from agent_workflow.core.infrastructure.in_memory_store import InMemoryStore
 
 
 def _entry(key: str, value: str) -> MemoryEntry:
@@ -41,7 +41,7 @@ def test_query_terms_filters_short_tokens() -> None:
 
 
 def test_score_counts_shared_terms() -> None:
-    from core.context.memory import score_entry
+    from agent_workflow.core.context.memory import score_entry
 
     entry = _entry(
         "ui-framework",

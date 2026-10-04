@@ -1,12 +1,12 @@
-from core.context.synthesis import (
+from agent_workflow.core.context.synthesis import (
     CITATION_RULE,
     GROUNDING_RULE,
     REQUIREMENTS_RULE,
     build_synthesis_guide,
 )
-from core.entities.models.agent_orchestrator import AgentOrchestrator
-from core.entities.models.planner import Planner
-from core.entities.models.task_contract import TaskContract
+from agent_workflow.core.entities.models.agent_orchestrator import AgentOrchestrator
+from agent_workflow.core.entities.models.planner import Planner
+from agent_workflow.core.entities.models.task_contract import TaskContract
 
 
 def _research_state() -> object:

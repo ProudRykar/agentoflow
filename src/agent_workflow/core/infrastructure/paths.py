@@ -11,7 +11,7 @@ model = "gemma4:12b"
 timeout = 600
 
 [context]
-max_messages = 4
+max_messages = 24
 
 [memory]
 database = "memory.db"
@@ -45,6 +45,12 @@ class AgentWorkflowPaths:
     @property
     def history(self) -> Path:
         return self.home / "history"
+
+    @property
+    def sessions(self) -> Path:
+        """Where the web layer keeps its session registry."""
+
+        return self.home / "sessions.json"
 
     def resolve(self, path: str | Path) -> Path:
         path = Path(path)

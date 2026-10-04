@@ -1,12 +1,12 @@
-from core.entities.models.agent_phase import AgentPhase
-from core.entities.models.plan_step import (
+from agent_workflow.core.entities.models.agent_phase import AgentPhase
+from agent_workflow.core.entities.models.plan_step import (
     DelegationHint,
     PlanStep,
     PlanStepStatus,
 )
-from core.entities.models.planner import Planner
-from core.entities.models.subagent import SubagentPower
-from core.entities.models.task_contract import TaskContract
+from agent_workflow.core.entities.models.planner import Planner
+from agent_workflow.core.entities.models.subagent import SubagentPower
+from agent_workflow.core.entities.models.task_contract import TaskContract
 
 
 def test_research_step_has_hint() -> None:

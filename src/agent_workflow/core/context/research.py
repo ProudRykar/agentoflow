@@ -14,19 +14,16 @@ class ResearchContext:
 
     contract = WHAT to investigate (from TaskContract).
     coverage = HOW MUCH is covered (snapshot copy).
-    evidence_ids = WHICH stored evidence supports it.
     """
 
     contract: ResearchContract | None
     coverage: ResearchCoverage
-    evidence_ids: tuple[str, ...]
 
     @classmethod
     def snapshot(
         cls,
         contract: ResearchContract | None,
         coverage: ResearchCoverage,
-        evidence_ids: tuple[str, ...],
     ) -> ResearchContext:
         return cls(
             contract=contract,
@@ -45,5 +42,4 @@ class ResearchContext:
                 ),
                 total_bytes=coverage.total_bytes,
             ),
-            evidence_ids=tuple(evidence_ids),
         )

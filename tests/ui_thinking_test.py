@@ -1,6 +1,6 @@
 import pytest
 
-from cli.ui.state import (
+from agent_workflow.cli.ui.state import (
     AgentRunView,
     ThinkingView,
     UIState,
@@ -86,7 +86,7 @@ def test_next_iteration_gets_own_view(
 def test_content_never_leaks_into_older_view(
     thinking_state: object,
 ) -> None:
-    from cli.ui.state import ToolView
+    from agent_workflow.cli.ui.state import ToolView
 
     thinking_state.start_thinking(1)  # type: ignore[union-attr]
     thinking_state.append_thinking("first")  # type: ignore[union-attr]

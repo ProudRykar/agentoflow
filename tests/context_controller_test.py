@@ -2,14 +2,14 @@ from typing import Any
 
 import pytest
 
-from core.context.context_budget import ContextBudget
-from core.context.context_controller import ContextController
-from core.context.history import HistoryKind
-from core.context.llm_request import LLMRequestContext
-from core.entities.models.agent_orchestrator import AgentOrchestrator
-from core.entities.models.context_manager import ContextManager
-from core.entities.models.planner import Planner
-from core.entities.models.task_contract import TaskContract
+from agent_workflow.core.context.context_budget import ContextBudget
+from agent_workflow.core.context.context_controller import ContextController
+from agent_workflow.core.context.history import HistoryKind
+from agent_workflow.core.context.llm_request import LLMRequestContext
+from agent_workflow.core.entities.models.agent_orchestrator import AgentOrchestrator
+from agent_workflow.core.entities.models.context_manager import ContextManager
+from agent_workflow.core.entities.models.planner import Planner
+from agent_workflow.core.entities.models.task_contract import TaskContract
 
 
 def _started_orchestrator(
@@ -179,23 +179,42 @@ def test_rollover_restores_user_context_once() -> None:
     assert result.history_context[0].reference == "window-01"
 
 
-def test_rollover_without_task_forbidden_and_untouched() -> None:
+def test_rollover_without_task_is_a_no_op() -> None:
+    """Without a task anchor there is nothing to checkpoint.
+
+    The invariant is still "no new context without a checkpoint", but
+    it is enforced by skipping the rollover rather than by raising:
+    a session restored from disk has a transcript and no live anchor,
+    and raising here killed the run on the first budget check. The
+    assembler already trims to the budget, so skipping loses nothing.
+    """
+
     controller = ContextController()
     conversation = ContextManager()
     conversation.create("hello")
 
-    with pytest.raises(RuntimeError):
-        controller.rollover(
-            AgentOrchestrator(),
-            conversation,
-        )
+    result = controller.rollover(
+        AgentOrchestrator(),
+        conversation,
+    )
+
+    assert result.performed is False
+    assert result.checkpoint is None
+    assert result.cleared_messages == 0
 
     assert conversation.dialogue() == [
         {"role": "user", "content": "hello"}
     ]
 
 
-def test_rollover_clears_fully_without_trailing_user() -> None:
+def test_rollover_keeps_the_instruction_even_when_not_last() -> None:
+    """The instruction is searched for, not assumed to be last.
+
+    Rollover runs at the top of an iteration, where the window
+    normally ends with a tool result. Requiring the user message to
+    be the final one meant the prompt was discarded every time.
+    """
+
     orchestrator = _started_orchestrator()
     controller = ContextController()
     conversation = ContextManager()
@@ -213,8 +232,7 @@ def test_rollover_clears_fully_without_trailing_user() -> None:
         conversation,
     )
 
-    assert result.cleared_messages == 2
-    assert conversation.dialogue() == []
-
-    # Only the harness system message remains.
-    assert len(conversation.messages()) == 1
+    assert result.cleared_messages == 1
+    assert conversation.dialogue() == [
+        {"role": "user", "content": "Read test.txt"}
+    ]

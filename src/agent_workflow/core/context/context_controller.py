@@ -35,13 +35,22 @@ HISTORY_RESTORE_LIMIT = 5
 
 @dataclass(slots=True, frozen=True)
 class RolloverResult:
-    """Outcome of one context-window rollover."""
+    """Outcome of one context-window rollover.
 
-    checkpoint: TaskCheckpoint
+    ``checkpoint`` is None when the window could not be closed
+    because there was nothing to checkpoint. That happens for a
+    session restored from disk: it has a transcript but no live task
+    anchor. Such a rollover is a no-op on purpose, because clearing
+    a window without a checkpoint would destroy context that cannot
+    be reconstructed.
+    """
+
+    checkpoint: TaskCheckpoint | None
     window_id: str
     previous_window_id: str
     history_context: tuple[ContextItem, ...]
     cleared_messages: int
+    performed: bool = True
 
 
 class ContextController:
@@ -128,6 +137,36 @@ class ContextController:
                 f"no checkpoint for {task_id}"
             ) from exc
 
+    def adopt_checkpoint(
+        self,
+        checkpoint: TaskCheckpoint,
+    ) -> None:
+        """Re-seed a checkpoint loaded from disk.
+
+        ``restore_checkpoint`` deliberately raises for an unknown
+        task: that guard exists so a live run cannot continue blind.
+        After a restart there is nothing to be blind about, the
+        checkpoint simply arrived with the session.
+        """
+
+        self._checkpoints[checkpoint.task_id] = checkpoint
+
+    def adopt_history(
+        self,
+        items: tuple,
+    ) -> None:
+        """Re-seed history items loaded from disk."""
+
+        for item in items:
+            self._history.append(
+                task_id=item.task_id,
+                run_id=item.run_id,
+                window_id=item.window_id,
+                kind=item.kind,
+                content=item.content,
+                reference=item.reference,
+            )
+
     # ==================================================================
     # History
     # ==================================================================
@@ -194,14 +233,29 @@ class ContextController:
         for the next assembled request.
         """
 
+        previous_window = self.current_window_id
+
         # Gate 1: save must succeed before anything is cleared.
-        checkpoint = self.save_checkpoint(orchestrator)
+        try:
+            checkpoint = self.save_checkpoint(orchestrator)
+        except RuntimeError:
+            # A restored session has a transcript but no live task
+            # anchor, so there is nothing to checkpoint. Clearing the
+            # window anyway would throw away context that cannot be
+            # rebuilt, so the rollover is skipped and the caller
+            # keeps working with what it has.
+            return RolloverResult(
+                checkpoint=None,
+                window_id=previous_window,
+                previous_window_id=previous_window,
+                history_context=(),
+                cleared_messages=0,
+                performed=False,
+            )
 
         # Gate 2: the checkpoint must be retrievable, or the
         # run is blocked instead of continuing blind.
-        read_back = self.restore_checkpoint(
-            checkpoint.task_id
-        )
+        read_back = self.restore_checkpoint(checkpoint.task_id)
 
         if read_back != checkpoint:
             raise RuntimeError(
@@ -210,7 +264,6 @@ class ContextController:
             )
 
         task_id = checkpoint.task_id
-        previous_window = self.current_window_id
 
         history_context = self._select_restore_context(
             task_id,
@@ -227,10 +280,12 @@ class ContextController:
 
         dialogue = conversation.dialogue()
 
-        keep: list[dict[str, Any]] = []
-
-        if dialogue and dialogue[-1].get("role") == "user":
-            keep = [dialogue[-1]]
+        # The instruction the user gave is the last thing that must
+        # survive. It is searched for rather than assumed to be the
+        # final message: rollover runs at the top of an iteration,
+        # where the window usually ends with a tool result, so
+        # checking only dialogue[-1] silently dropped the prompt.
+        keep = _trailing_instruction(dialogue)
 
         conversation.clear()
 
@@ -245,6 +300,7 @@ class ContextController:
             previous_window_id=previous_window,
             history_context=history_context,
             cleared_messages=len(dialogue) - len(keep),
+            performed=True,
         )
 
     def _select_restore_context(
@@ -264,6 +320,7 @@ class ContextController:
             in (
                 HistoryKind.USER_MESSAGE,
                 HistoryKind.ASSISTANT_MESSAGE,
+                HistoryKind.TOOL_RESULT,
             )
             and item.content.strip()
         ]
@@ -278,3 +335,22 @@ class ContextController:
             )
             for item in selected
         )
+
+
+def _trailing_instruction(
+    dialogue: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """The most recent user instruction in the window, if any.
+
+    Everything after it is dropped, so the surviving slice can never
+    start with an orphaned tool result: a user message is never a
+    tool result.
+    """
+
+    for index in range(len(dialogue) - 1, -1, -1):
+        message = dialogue[index]
+
+        if message.get("role") == "user":
+            return [message]
+
+    return []

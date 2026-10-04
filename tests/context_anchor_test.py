@@ -2,18 +2,18 @@ import dataclasses
 
 import pytest
 
-from core.context.conversation import ConversationManager
-from core.context.execution_context import ExecutionContext
-from core.context.task_anchor import TaskAnchor
-from core.context.task_state import TaskState
-from core.context.tokens import ApproximateTokenCounter
-from core.entities.models.agent_orchestrator import AgentOrchestrator
-from core.entities.models.agent_phase import AgentPhase
-from core.entities.models.context_manager import ContextManager
-from core.entities.models.planner import Planner
-from core.entities.models.research_contract import ResearchCoverage
-from core.entities.models.task_contract import TaskContract
-from core.entities.models.task_plan import TaskPlan
+from agent_workflow.core.context.conversation import ConversationManager
+from agent_workflow.core.context.execution_context import ExecutionContext
+from agent_workflow.core.context.task_anchor import TaskAnchor
+from agent_workflow.core.context.task_state import TaskState
+from agent_workflow.core.context.tokens import ApproximateTokenCounter
+from agent_workflow.core.entities.models.agent_orchestrator import AgentOrchestrator
+from agent_workflow.core.entities.models.agent_phase import AgentPhase
+from agent_workflow.core.entities.models.context_manager import ContextManager
+from agent_workflow.core.entities.models.planner import Planner
+from agent_workflow.core.entities.models.research_contract import ResearchCoverage
+from agent_workflow.core.entities.models.task_contract import TaskContract
+from agent_workflow.core.entities.models.task_plan import TaskPlan
 
 
 def test_task_anchor_is_immutable() -> None:

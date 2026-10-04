@@ -129,6 +129,9 @@ class EvidenceReceipt:
         )
 
 
+DEFAULT_MAX_EVIDENCE = 200
+
+
 class EvidenceStore:
     """Append-only task-owned storage for evidence.
 
@@ -137,9 +140,26 @@ class EvidenceStore:
     already serializes via ``to_dict()`` / ``from_dict()``.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        max_items: int = DEFAULT_MAX_EVIDENCE,
+    ) -> None:
         self._items: dict[str, Evidence] = {}
         self._counter: int = 0
+        self._max_items = max(1, max_items)
+        self._pinned: set[str] = set()
+
+    @property
+    def max_items(self) -> int:
+        """Soft limit: the age-based eviction target."""
+
+        return self._max_items
+
+    @property
+    def hard_max_items(self) -> int:
+        """Ceiling that even pinned items may not cross."""
+
+        return self._max_items * 2
 
     def __len__(self) -> int:
         return len(self._items)
@@ -147,6 +167,59 @@ class EvidenceStore:
     @property
     def ids(self) -> tuple[str, ...]:
         return tuple(self._items)
+
+    def pin(self, evidence_id: str) -> None:
+        """Keep an item regardless of age.
+
+        Used for evidence a checkpoint cites: dropping it would leave
+        the checkpoint referring to something the model can no longer
+        read.
+        """
+
+        if evidence_id in self._items:
+            self._pinned.add(evidence_id)
+
+    def unpin(self, evidence_id: str) -> None:
+        self._pinned.discard(evidence_id)
+
+    def trim_to(self, max_items: int) -> None:
+        """Apply a limit chosen by the caller.
+
+        Used when restoring from disk: the live cap is sized for one
+        run, but a restored store should not immediately drop the
+        evidence a checkpoint cites.
+        """
+
+        self._max_items = max(1, max_items)
+        self._evict()
+
+    def _evict(self) -> None:
+        """Drop the oldest unpinned items down to the soft limit.
+
+        The limit applies to unpinned evidence only: pinned items are
+        referenced by checkpoints, so they are held on top of the
+        budget rather than counting against it. A hard ceiling still
+        applies to the total, so pinning cannot grow without bound.
+        """
+
+        unpinned = [
+            evidence_id
+            for evidence_id in self._items
+            if evidence_id not in self._pinned
+        ]
+
+        overflow = len(unpinned) - self._max_items
+
+        for evidence_id in unpinned[:max(0, overflow)]:
+            self._items.pop(evidence_id, None)
+
+        while len(self._items) > self.hard_max_items:
+            oldest = next(iter(self._items), None)
+
+            if oldest is None:
+                break
+
+            del self._items[oldest]
 
     def append_page(
         self,
@@ -164,6 +237,7 @@ class EvidenceStore:
         )
 
         self._items[evidence_id] = evidence
+        self._evict()
 
         return evidence
 
@@ -183,6 +257,8 @@ class EvidenceStore:
                 for evidence in self._items.values()
             ],
             "counter": self._counter,
+            "max_items": self._max_items,
+            "pinned": sorted(self._pinned),
         }
 
     @classmethod
@@ -209,5 +285,12 @@ class EvidenceStore:
             store._items[evidence.evidence_id] = evidence
 
         store._counter = int(data.get("counter", len(store._items)))
+        store._max_items = int(
+            data.get("max_items", store._max_items)  # type: ignore[arg-type]
+        )
+        store._pinned = {
+            str(item)
+            for item in (data.get("pinned") or [])  # type: ignore[union-attr]
+        }
 
         return store

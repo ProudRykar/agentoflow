@@ -9,3 +9,8 @@ wheels/
 # Virtual environments
 .venv
 .env
+
+# Frontend
+node_modules/
+frontend/dist/
+*.tsbuildinfo

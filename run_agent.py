@@ -18,6 +18,8 @@ from core.entities.models.builtin.history_tools import (
     create_history_tool,
 )
 from core.entities.models.builtin.registry import create_builtin_registry
+from core.context.context_assembler import ContextAssembler
+from core.context.tokens import ApproximateTokenCounter
 from core.entities.models.context_manager import ContextManager
 from core.entities.models.guardrail_hook import GuardrailHook
 from core.entities.models.guardrails.allowed_tools import (
@@ -131,13 +133,16 @@ async def main() -> None:
 
     context_policy = ContextPolicy(
         max_messages=config.context.max_messages,
-        token_estimation_divisor=(
-            config.context.token_estimation_divisor
-        ),
     )
 
     context_manager = ContextManager(
         policy=context_policy,
+    )
+
+    # The divisor used to be set on the policy, where nothing read
+    # it, so the configured value was silently ignored here.
+    counter = ApproximateTokenCounter(
+        divisor=config.context.token_estimation_divisor,
     )
 
     executor = ToolExecutor(registry)
@@ -152,6 +157,7 @@ async def main() -> None:
         registry=registry,
         executor=executor,
         context_manager=context_manager,
+        assembler=ContextAssembler(counter=counter),
         memory=memory,
         max_iterations=config.agent.max_iterations,
         on_event=print_event,

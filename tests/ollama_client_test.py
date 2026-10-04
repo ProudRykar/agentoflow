@@ -3,9 +3,9 @@ from typing import Any
 import httpx
 import pytest
 
-from core.entities.models.llm import LLMResponse
-from core.entities.models.tool_definition import ToolDefinition
-from core.infrastructure.ollama_client import (
+from agent_workflow.core.entities.models.llm import LLMResponse
+from agent_workflow.core.entities.models.tool_definition import ToolDefinition
+from agent_workflow.core.infrastructure.ollama_client import (
     OllamaClient,
     OllamaOptions,
 )

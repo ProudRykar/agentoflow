@@ -2,7 +2,7 @@ from dataclasses import replace
 
 import pytest
 
-from core.entities.models.model_catalog import (
+from agent_workflow.core.entities.models.model_catalog import (
     ModelAttributes,
     ModelCapability,
     ModelCatalog,
@@ -10,11 +10,11 @@ from core.entities.models.model_catalog import (
     ModelRequirements,
     ModelSpeed,
 )
-from core.entities.models.model_router import (
+from agent_workflow.core.entities.models.model_router import (
     DefaultModelRouter,
     ModelRoutingError,
 )
-from core.entities.models.subagent import (
+from agent_workflow.core.entities.models.subagent import (
     SubagentPower,
     SubagentTask,
     TaskComplexity,

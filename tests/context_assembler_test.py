@@ -2,22 +2,22 @@ from typing import Any
 
 import pytest
 
-from core.context.checkpoint import build_checkpoint
-from core.context.context_assembler import ContextAssembler
-from core.context.context_budget import ContextBudget
-from core.context.context_item import (
+from agent_workflow.core.context.checkpoint import build_checkpoint
+from agent_workflow.core.context.context_assembler import ContextAssembler
+from agent_workflow.core.context.context_budget import ContextBudget
+from agent_workflow.core.context.context_item import (
     ContextItem,
     ContextSource,
 )
-from core.context.tokens import ApproximateTokenCounter
-from core.entities.models.agent_orchestrator import AgentOrchestrator
-from core.entities.models.planner import Planner
-from core.entities.models.research_contract import (
+from agent_workflow.core.context.tokens import ApproximateTokenCounter
+from agent_workflow.core.entities.models.agent_orchestrator import AgentOrchestrator
+from agent_workflow.core.entities.models.planner import Planner
+from agent_workflow.core.entities.models.research_contract import (
     ResearchPage,
     ResearchResult,
 )
-from core.entities.models.task_contract import TaskContract
-from core.entities.models.tool_definition import ToolDefinition
+from agent_workflow.core.entities.models.task_contract import TaskContract
+from agent_workflow.core.entities.models.tool_definition import ToolDefinition
 
 
 def _started_orchestrator(
@@ -263,8 +263,8 @@ def test_memory_and_history_fit_when_space() -> None:
 
 
 def test_delegation_hints_rendered_on_marked_steps() -> None:
-    from core.entities.models.planner import Planner
-    from core.entities.models.task_contract import TaskContract
+    from agent_workflow.core.entities.models.planner import Planner
+    from agent_workflow.core.entities.models.task_contract import TaskContract
 
     planner = Planner()
     prompt = "Research https://example.com docs"
@@ -308,7 +308,7 @@ def test_no_hints_no_suffix() -> None:
 
 
 def test_failed_fetches_carry_guidance() -> None:
-    from core.entities.models.research_contract import ResearchCoverage
+    from agent_workflow.core.entities.models.research_contract import ResearchCoverage
 
     orchestrator = _started_orchestrator()
     orchestrator.task_progress.research_coverage.failed_urls.add(

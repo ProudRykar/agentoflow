@@ -3,16 +3,16 @@ from typing import Any
 
 import pytest
 
-from core.entities.models.agent import Agent
-from core.entities.models.builtin.read_file import (
+from agent_workflow.core.entities.models.agent import Agent
+from agent_workflow.core.entities.models.builtin.read_file import (
     ReadFileInput,
     read_file,
 )
-from core.entities.models.llm import LLMResponse, LLMToolCall
-from core.entities.models.llm_client import LLMClient
-from core.entities.models.tool import Tool, ToolContext, ToolPolicy
-from core.entities.models.tool_executor import ToolExecutor
-from core.entities.models.tool_registry import ToolRegistry
+from agent_workflow.core.entities.models.llm import LLMResponse, LLMToolCall
+from agent_workflow.core.entities.models.llm_client import LLMClient
+from agent_workflow.core.entities.models.tool import Tool, ToolContext, ToolPolicy
+from agent_workflow.core.entities.models.tool_executor import ToolExecutor
+from agent_workflow.core.entities.models.tool_registry import ToolRegistry
 
 
 class FakeLLM(LLMClient):

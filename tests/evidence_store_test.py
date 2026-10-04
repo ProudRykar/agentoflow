@@ -4,25 +4,25 @@ from typing import Any
 
 import pytest
 
-from core.context.evidence import (
+from agent_workflow.core.context.evidence import (
     Evidence,
     EvidenceStore,
 )
-from core.context.research import ResearchContext
-from core.entities.models.agent import Agent
-from core.entities.models.agent_orchestrator import AgentOrchestrator
-from core.entities.models.llm import LLMResponse, LLMToolCall
-from core.entities.models.llm_client import LLMClient
-from core.entities.models.research_contract import (
+from agent_workflow.core.context.research import ResearchContext
+from agent_workflow.core.entities.models.agent import Agent
+from agent_workflow.core.entities.models.agent_orchestrator import AgentOrchestrator
+from agent_workflow.core.entities.models.llm import LLMResponse, LLMToolCall
+from agent_workflow.core.entities.models.llm_client import LLMClient
+from agent_workflow.core.entities.models.research_contract import (
     ResearchContract,
     ResearchCoverage,
     ResearchPage,
     ResearchResult,
 )
-from core.entities.models.task_contract import TaskContract
-from core.entities.models.tool import Tool, ToolContext, ToolPolicy
-from core.entities.models.tool_executor import ToolExecutor
-from core.entities.models.tool_registry import ToolRegistry
+from agent_workflow.core.entities.models.task_contract import TaskContract
+from agent_workflow.core.entities.models.tool import Tool, ToolContext, ToolPolicy
+from agent_workflow.core.entities.models.tool_executor import ToolExecutor
+from agent_workflow.core.entities.models.tool_registry import ToolRegistry
 
 
 def _make_page() -> ResearchPage:
@@ -130,7 +130,6 @@ def test_research_context_snapshot_isolates_coverage() -> None:
     snapshot = ResearchContext.snapshot(
         contract=None,
         coverage=coverage,
-        evidence_ids=("ev-0001",),
     )
 
     coverage.fetched_urls.add("https://other.example/")
@@ -138,7 +137,6 @@ def test_research_context_snapshot_isolates_coverage() -> None:
     assert snapshot.coverage.fetched_urls == {
         "https://example.com/"
     }
-    assert snapshot.evidence_ids == ("ev-0001",)
 
 
 def test_store_research_evidence_merges_and_receipts() -> None:
@@ -171,7 +169,6 @@ def test_store_research_evidence_merges_and_receipts() -> None:
     context = orchestrator.research_context
 
     assert context.contract == contract.research
-    assert context.evidence_ids == ("ev-0001",)
     assert "https://example.com/" in context.coverage.fetched_urls
 
 
@@ -284,7 +281,7 @@ async def test_agent_writes_receipt_not_page_body(
     assert stored is not None
     assert stored.content == "SECRET_PAGE_BODY"
 
-    from core.context.history import HistoryKind
+    from agent_workflow.core.context.history import HistoryKind
 
     kinds = [
         item.kind

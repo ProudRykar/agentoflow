@@ -3,16 +3,16 @@ from typing import Any
 
 import pytest
 
-from core.application.subagents import (
+from agent_workflow.core.application.subagents import (
     SubagentAgentFactory,
     options_by_model,
 )
-from core.context.context_assembler import ContextAssembler
-from core.context.context_controller import ContextController
-from core.entities.models.agent import Agent
-from core.entities.models.llm import LLMResponse
-from core.entities.models.llm_client import LLMClient
-from core.entities.models.model_catalog import (
+from agent_workflow.core.context.context_assembler import ContextAssembler
+from agent_workflow.core.context.context_controller import ContextController
+from agent_workflow.core.entities.models.agent import Agent
+from agent_workflow.core.entities.models.llm import LLMResponse
+from agent_workflow.core.entities.models.llm_client import LLMClient
+from agent_workflow.core.entities.models.model_catalog import (
     ModelAttributes,
     ModelCapability,
     ModelCatalog,
@@ -20,19 +20,19 @@ from core.entities.models.model_catalog import (
     ModelRequirements,
     ModelSpeed,
 )
-from core.entities.models.subagent import (
+from agent_workflow.core.entities.models.subagent import (
     AgentRun,
     SubagentPower,
     SubagentStatus,
     SubagentTask,
     TaskProfile,
 )
-from core.entities.models.subagent_manager import SubagentManager
-from core.entities.models.tool import ToolContext
-from core.entities.models.tool_executor import ToolExecutor
-from core.entities.models.tool_registry import ToolRegistry
-from core.infrastructure.config import SubagentConfig
-from core.infrastructure.llm.model_runtime import (
+from agent_workflow.core.entities.models.subagent_manager import SubagentManager
+from agent_workflow.core.entities.models.tool import ToolContext
+from agent_workflow.core.entities.models.tool_executor import ToolExecutor
+from agent_workflow.core.entities.models.tool_registry import ToolRegistry
+from agent_workflow.core.infrastructure.config import SubagentConfig
+from agent_workflow.core.infrastructure.llm.model_runtime import (
     ModelRuntimeManager,
 )
 

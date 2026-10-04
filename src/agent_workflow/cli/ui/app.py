@@ -25,7 +25,7 @@ from textual.widgets import (
     TextArea,
 )
 
-from agent_workflow.cli.approval import ApprovalController
+from agent_workflow.core.entities.models.approval import ApprovalController
 from agent_workflow.cli.ui.state import (
     TOOL_OUTPUT_COLLAPSED_CHARS,
     AgentRunView,

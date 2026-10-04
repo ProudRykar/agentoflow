@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from core.entities.models.path_policy import (
+from agent_workflow.core.entities.models.path_policy import (
     PathPolicy,
     PathPolicyError,
 )

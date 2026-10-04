@@ -2,12 +2,12 @@ from pathlib import Path
 
 import pytest
 
-from core.entities.models.builtin.read_file import (
+from agent_workflow.core.entities.models.builtin.read_file import (
     ReadFileInput,
     read_file,
 )
-from core.entities.models.path_policy import PathPolicyError
-from core.entities.models.tool import ToolContext
+from agent_workflow.core.entities.models.path_policy import PathPolicyError
+from agent_workflow.core.entities.models.tool import ToolContext
 
 
 def create_context(

@@ -3,22 +3,22 @@ from typing import Any
 
 import pytest
 
-from core.context.context_assembler import ContextAssembler
-from core.context.context_budget import ContextBudget
-from core.context.context_controller import ContextController
-from core.context.history import HistoryKind
-from core.context.tokens import ApproximateTokenCounter
-from core.entities.models.agent import Agent
-from core.entities.models.agent_orchestrator import AgentOrchestrator
-from core.entities.models.builtin.read_file import (
+from agent_workflow.core.context.context_assembler import ContextAssembler
+from agent_workflow.core.context.context_budget import ContextBudget
+from agent_workflow.core.context.context_controller import ContextController
+from agent_workflow.core.context.history import HistoryKind
+from agent_workflow.core.context.tokens import ApproximateTokenCounter
+from agent_workflow.core.entities.models.agent import Agent
+from agent_workflow.core.entities.models.agent_orchestrator import AgentOrchestrator
+from agent_workflow.core.entities.models.builtin.read_file import (
     ReadFileInput,
     read_file,
 )
-from core.entities.models.llm import LLMResponse, LLMToolCall
-from core.entities.models.llm_client import LLMClient
-from core.entities.models.tool import Tool, ToolContext, ToolPolicy
-from core.entities.models.tool_executor import ToolExecutor
-from core.entities.models.tool_registry import ToolRegistry
+from agent_workflow.core.entities.models.llm import LLMResponse, LLMToolCall
+from agent_workflow.core.entities.models.llm_client import LLMClient
+from agent_workflow.core.entities.models.tool import Tool, ToolContext, ToolPolicy
+from agent_workflow.core.entities.models.tool_executor import ToolExecutor
+from agent_workflow.core.entities.models.tool_registry import ToolRegistry
 
 
 class OneToolThenDoneLLM(LLMClient):

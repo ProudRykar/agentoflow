@@ -1,9 +1,9 @@
 import pytest
 
-from core.entities.models.agent_orchestrator import (
+from agent_workflow.core.entities.models.agent_orchestrator import (
     AgentOrchestrator,
 )
-from core.entities.models.agent_phase import AgentPhase
+from agent_workflow.core.entities.models.agent_phase import AgentPhase
 
 
 def test_agent_starts_in_planning() -> None:
@@ -24,8 +24,8 @@ def test_agent_starts_in_planning() -> None:
 
 
 def test_web_tool_enters_research() -> None:
-    from core.entities.models.planner import Planner
-    from core.entities.models.task_contract import TaskContract
+    from agent_workflow.core.entities.models.planner import Planner
+    from agent_workflow.core.entities.models.task_contract import TaskContract
 
     prompt = "Research https://example.com documentation"
     task_plan = Planner().plan(prompt)

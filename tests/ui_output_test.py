@@ -3,9 +3,9 @@ from typing import Any
 
 import pytest
 
-from cli.approval import ApprovalController
-from cli.ui.app import AgentUI
-from cli.ui.state import (
+from agent_workflow.core.entities.models.approval import ApprovalController
+from agent_workflow.cli.ui.app import AgentUI
+from agent_workflow.cli.ui.state import (
     TOOL_OUTPUT_COLLAPSED_CHARS,
     TOOL_OUTPUT_PREVIEW_CHARS,
     ToolStatus,
@@ -13,11 +13,11 @@ from cli.ui.state import (
     research_summary,
     store_tool_output,
 )
-from core.context.history import (
+from agent_workflow.core.context.history import (
     HistoryKind,
     InMemoryHistoryStore,
 )
-from core.entities.models.research_contract import (
+from agent_workflow.core.entities.models.research_contract import (
     ResearchPage,
     ResearchResult,
 )
@@ -59,7 +59,7 @@ def test_store_empty_output() -> None:
 
 
 def test_store_long_output_evicted() -> None:
-    from cli.ui.state import TOOL_OUTPUT_KEEP_CHARS
+    from agent_workflow.cli.ui.state import TOOL_OUTPUT_KEEP_CHARS
 
     big = "x" * (TOOL_OUTPUT_KEEP_CHARS + 100)
 
@@ -71,7 +71,7 @@ def test_store_long_output_evicted() -> None:
 
 
 def test_store_medium_output_kept() -> None:
-    from cli.ui.state import TOOL_OUTPUT_KEEP_CHARS
+    from agent_workflow.cli.ui.state import TOOL_OUTPUT_KEEP_CHARS
 
     medium = "x" * (TOOL_OUTPUT_KEEP_CHARS - 100)
 
@@ -97,7 +97,7 @@ def test_research_summary_rejects_plain() -> None:
 
 
 def test_finish_tool_evicts_and_summarizes() -> None:
-    from cli.ui.state import UIState
+    from agent_workflow.cli.ui.state import UIState
 
     state = UIState()
     state.add_tool("call_1", "web_crawl", {})
@@ -289,24 +289,24 @@ async def test_agent_emits_tokens_and_duration(
 ) -> None:
     from pathlib import Path
 
-    from core.entities.models.agent import Agent
-    from core.entities.models.agent_trace import (
+    from agent_workflow.core.entities.models.agent import Agent
+    from agent_workflow.core.entities.models.agent_trace import (
         LLMRequested,
         ToolFinished,
     )
-    from core.entities.models.builtin.read_file import (
+    from agent_workflow.core.entities.models.builtin.read_file import (
         ReadFileInput,
         read_file,
     )
-    from core.entities.models.llm import LLMResponse, LLMToolCall
-    from core.entities.models.llm_client import LLMClient
-    from core.entities.models.tool import (
+    from agent_workflow.core.entities.models.llm import LLMResponse, LLMToolCall
+    from agent_workflow.core.entities.models.llm_client import LLMClient
+    from agent_workflow.core.entities.models.tool import (
         Tool,
         ToolContext,
         ToolPolicy,
     )
-    from core.entities.models.tool_executor import ToolExecutor
-    from core.entities.models.tool_registry import ToolRegistry
+    from agent_workflow.core.entities.models.tool_executor import ToolExecutor
+    from agent_workflow.core.entities.models.tool_registry import ToolRegistry
 
     tmp = Path(str(tmp_path))
     (tmp / "test.txt").write_text("hello", encoding="utf-8")

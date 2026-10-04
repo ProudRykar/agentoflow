@@ -3,11 +3,11 @@ from typing import Any
 
 import pytest
 
-from core.entities.models.arguments import ArgumentDecoder
-from core.entities.models.builtin.read_file import ReadFileInput
-from core.entities.models.tool import Tool, ToolContext, ToolPolicy
-from core.entities.models.tool_executor import ToolExecutor
-from core.entities.models.tool_registry import ToolRegistry
+from agent_workflow.core.entities.models.arguments import ArgumentDecoder
+from agent_workflow.core.entities.models.builtin.read_file import ReadFileInput
+from agent_workflow.core.entities.models.tool import Tool, ToolContext, ToolPolicy
+from agent_workflow.core.entities.models.tool_executor import ToolExecutor
+from agent_workflow.core.entities.models.tool_registry import ToolRegistry
 
 
 def create_registry(

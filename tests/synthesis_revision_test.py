@@ -4,24 +4,24 @@ from typing import Any
 
 import pytest
 
-from core.entities.models.agent import Agent
-from core.entities.models.agent_orchestrator import AgentOrchestrator
-from core.entities.models.builtin.read_file import (
+from agent_workflow.core.entities.models.agent import Agent
+from agent_workflow.core.entities.models.agent_orchestrator import AgentOrchestrator
+from agent_workflow.core.entities.models.builtin.read_file import (
     ReadFileInput,
     read_file,
 )
-from core.entities.models.llm import LLMResponse, LLMToolCall
-from core.entities.models.llm_client import LLMClient
-from core.entities.models.planner import Planner
-from core.entities.models.research_contract import (
+from agent_workflow.core.entities.models.llm import LLMResponse, LLMToolCall
+from agent_workflow.core.entities.models.llm_client import LLMClient
+from agent_workflow.core.entities.models.planner import Planner
+from agent_workflow.core.entities.models.research_contract import (
     ResearchContract,
     ResearchPage,
     ResearchResult,
 )
-from core.entities.models.task_contract import TaskContract
-from core.entities.models.tool import Tool, ToolContext, ToolPolicy
-from core.entities.models.tool_executor import ToolExecutor
-from core.entities.models.tool_registry import ToolRegistry
+from agent_workflow.core.entities.models.task_contract import TaskContract
+from agent_workflow.core.entities.models.tool import Tool, ToolContext, ToolPolicy
+from agent_workflow.core.entities.models.tool_executor import ToolExecutor
+from agent_workflow.core.entities.models.tool_registry import ToolRegistry
 
 
 @dataclass(slots=True, frozen=True)

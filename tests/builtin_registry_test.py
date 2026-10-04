@@ -1,4 +1,4 @@
-from core.entities.models.builtin.registry import (
+from agent_workflow.core.entities.models.builtin.registry import (
     create_builtin_registry,
 )
 

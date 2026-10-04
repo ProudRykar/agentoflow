@@ -1,9 +1,9 @@
-from core.entities.models.builtin.subagent import (
+from agent_workflow.core.entities.models.builtin.subagent import (
     SubagentRunInput,
     apply_role_preset,
 )
-from core.entities.models.model_catalog import ModelCapability
-from core.entities.models.subagent import SubagentPower
+from agent_workflow.core.entities.models.model_catalog import ModelCapability
+from agent_workflow.core.entities.models.subagent import SubagentPower
 
 
 def _input(**overrides: object) -> SubagentRunInput:

@@ -3,16 +3,16 @@ from dataclasses import dataclass
 
 @dataclass(slots=True, frozen=True)
 class ContextPolicy:
-    max_messages: int | None = None
+    """How the conversation window is bounded.
 
-    # Divisor for ApproximateTokenCounter: estimated_tokens = len(text) // divisor.
-    token_estimation_divisor: int = 4
+    Only the message count lives here. Token estimation belongs to
+    ``ApproximateTokenCounter``: this policy used to carry a divisor
+    field that nothing ever read, so the configured value was
+    silently ignored wherever the policy was constructed.
+    """
+
+    max_messages: int | None = None
 
     def __post_init__(self) -> None:
         if self.max_messages is not None and self.max_messages < 1:
             raise ValueError("max_messages must be greater than 0")
-
-        if self.token_estimation_divisor <= 0:
-            raise ValueError(
-                "token_estimation_divisor must be greater than 0"
-            )

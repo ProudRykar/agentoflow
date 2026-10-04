@@ -204,6 +204,16 @@ class Agent:
         return self._model
 
     @property
+    def registry(self) -> ToolRegistry:
+        """The live tool registry.
+
+        Exposed read-only so observability layers (web API, CLI)
+        can inventory tools without reaching into internals.
+        """
+
+        return self._registry
+
+    @property
     def orchestrator(self) -> AgentOrchestrator:
         return self._orchestrator
 
@@ -214,6 +224,16 @@ class Agent:
     @property
     def controller(self) -> ContextController:
         return self._controller
+
+    @property
+    def context_manager(self) -> ContextManager:
+        """The live conversation window.
+
+        Exposed so a restored session can repopulate it without the
+        application layer reaching into a private attribute.
+        """
+
+        return self._context_manager
 
     @property
     def memory(self) -> MemoryManager | None:
@@ -607,8 +627,11 @@ class Agent:
         """
         Start a NEW execution run while preserving conversation context.
 
-        Every call is a NEW task with a NEW anchor: the previous
-        anchor stays in history, it never leaks into the new task.
+        A restored session keeps the anchor it was given: forcing a
+        new one would mint a task id that no longer matches the
+        restored conversation and checkpoint. A live session still
+        starts a fresh task, so a previous anchor never leaks into a
+        new one.
 
         This is deliberately NOT on_agent_resumed().
         """
@@ -621,11 +644,14 @@ class Agent:
             self._run_id,
         )
 
-        self._orchestrator.ensure_task_anchor(
-            prompt,
-            task_plan=self._orchestrator.task_plan,
-            force_new=True,
-        )
+        # Only a session that already has an anchor keeps it, and that
+        # happens exactly when it was restored from disk.
+        if self._orchestrator.task_anchor is None:
+            self._orchestrator.ensure_task_anchor(
+                prompt,
+                task_plan=self._orchestrator.task_plan,
+                force_new=True,
+            )
 
         transition = self._orchestrator.on_agent_started(
             prompt=prompt,

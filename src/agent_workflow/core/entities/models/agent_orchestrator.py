@@ -347,11 +347,35 @@ class AgentOrchestrator:
     def evidence_store(self) -> EvidenceStore:
         return self._evidence_store
 
+    def restore_working_state(
+        self,
+        *,
+        anchor: TaskAnchor | None = None,
+        evidence: EvidenceStore | None = None,
+    ) -> None:
+        """Re-adopt task state after a restart.
+
+        The anchor is the identity of the task: restoring it keeps a
+        continued conversation attached to the task it belongs to,
+        instead of ``continue_run`` minting a new id and orphaning
+        the transcript.
+        """
+
+        if anchor is not None:
+            self._task_anchor = anchor
+
+        if evidence is not None:
+            self._evidence_store = evidence
+
     @property
     def research_context(self) -> ResearchContext:
         """
-        Read-view over the research subsystem: contract,
-        coverage snapshot, and stored evidence ids.
+        Read-view over the research subsystem: contract and a
+        coverage snapshot.
+
+        Evidence ids used to be copied in here on every iteration
+        and never rendered, which made each request pay for an
+        O(evidence) tuple copy for nothing.
         """
 
         return ResearchContext.snapshot(
@@ -359,7 +383,6 @@ class AgentOrchestrator:
             coverage=(
                 self._task_progress.research_coverage
             ),
-            evidence_ids=self._evidence_store.ids,
         )
 
     def store_research_evidence(

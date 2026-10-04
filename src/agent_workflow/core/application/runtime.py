@@ -12,13 +12,14 @@ from agent_workflow.core.application.subagents import build_subagent_stack
 from agent_workflow.core.context.context_assembler import ContextAssembler
 from agent_workflow.core.context.context_controller import ContextController
 from agent_workflow.core.context.history import InMemoryHistoryStore
-from agent_workflow.core.context.tokens import ApproximateTokenCounter
+from agent_workflow.core.context.tokens import counter_for_model
 from agent_workflow.core.entities.models.builtin.history_tools import (
     create_history_tool,
 )
 from agent_workflow.core.entities.models.builtin.memory_registry import create_memory_tools
 from agent_workflow.core.entities.models.builtin.registry import create_builtin_registry
 from agent_workflow.core.entities.models.context_manager import ContextManager
+from agent_workflow.core.context.context_budget import ContextBudget
 from agent_workflow.core.entities.models.context_policy import ContextPolicy
 from agent_workflow.core.entities.models.guardrail_hook import GuardrailHook
 from agent_workflow.core.entities.models.guardrails.allowed_tools import (
@@ -38,8 +39,15 @@ from agent_workflow.core.entities.models.plugins.tools import create_plugins_too
 from agent_workflow.core.entities.models.tool import ToolContext
 from agent_workflow.core.entities.models.tool_executor import ToolExecutor
 from agent_workflow.core.infrastructure.config import Config, ConfigLoader
-from agent_workflow.core.infrastructure.ollama_client import OllamaClient
+from agent_workflow.core.infrastructure.ollama_client import (
+    OllamaClient,
+    OllamaOptions,
+)
 from agent_workflow.core.infrastructure.paths import AgentWorkflowPaths
+from agent_workflow.core.application.tool_stats_store import (
+    ToolStatsStore,
+)
+from agent_workflow.core.infrastructure.mcp.manager import MCPManager
 from agent_workflow.core.infrastructure.sqlite_store import SQLiteStore
 
 
@@ -47,6 +55,8 @@ ApprovalHandler = Callable[
     [ApprovalRequest],
     Awaitable[bool],
 ]
+
+STATS_DATABASE = "tool-usage.db"
 
 
 @dataclass(slots=True)
@@ -56,7 +66,37 @@ class AgentRuntime:
     store: SQLiteStore
     paths: AgentWorkflowPaths
     config: Config
-    plugin_manager: PluginManager
+    # Optional so a partially built runtime (tests, rehydration)
+    # can still compute permissions.
+    plugin_manager: PluginManager | None = None
+    mcp_manager: MCPManager | None = None
+
+    # Permissions granted by the harness itself, before any
+    # plugin or MCP contribution. Kept so the effective set can be
+    # recomputed when MCP servers come and go at runtime.
+    base_permissions: frozenset[str] = frozenset()
+    stats_store: ToolStatsStore | None = None
+
+    def refresh_permissions(self) -> frozenset[str]:
+        """Recompute and return the effective permission set."""
+
+        granted = set(self.base_permissions)
+
+        if self.plugin_manager is not None:
+            granted |= self.plugin_manager.granted_permissions()
+
+        if self.mcp_manager is not None:
+            granted |= self.mcp_manager.granted_permissions()
+
+        return frozenset(granted)
+
+    async def aclose(self) -> None:
+        """Release async resources, then the memory store."""
+
+        if self.mcp_manager is not None:
+            await self.mcp_manager.close()
+
+        self.store.close()
 
     def close(self) -> None:
         self.store.close()
@@ -64,7 +104,18 @@ class AgentRuntime:
 
 async def create_runtime(
     approval_handler: ApprovalHandler,
+    working_directory: Path | None = None,
+    stats_store: ToolStatsStore | None = None,
 ) -> AgentRuntime:
+    """Build one self-contained runtime.
+
+    Every call yields an independent Agent, ToolRegistry,
+    ContextManager and memory handle, which is what makes
+    concurrent sessions safe. ``approval_handler`` is injected
+    by the caller, so the approval surface (TUI or web) is
+    chosen outside the core.
+    """
+
     paths = AgentWorkflowPaths()
     paths.ensure()
 
@@ -81,7 +132,9 @@ async def create_runtime(
     for tool in create_memory_tools(memory):
         registry.register(tool)
 
-    working_directory = Path.cwd()
+    working_directory = working_directory or Path.cwd()
+
+    working_directory = working_directory.resolve()
 
     path_policy = PathPolicy(
         allowed_paths=(working_directory,),
@@ -106,17 +159,26 @@ async def create_runtime(
     context_manager = ContextManager(
         policy=ContextPolicy(
             max_messages=config.context.max_messages,
-            token_estimation_divisor=(
-                config.context.token_estimation_divisor
-            ),
         ),
     )
 
-    counter = ApproximateTokenCounter(
+    counter = counter_for_model(
+        config.llm.model,
         divisor=config.context.token_estimation_divisor,
     )
 
+    # The budget has to describe the model that will actually read
+    # it. A hardcoded 32k while Ollama runs with its own default is
+    # how a "within budget" request still gets rejected upstream.
+    context_size = _model_context_size(
+        paths.resolve(config.models.catalog or "models.toml"),
+        config.llm.model,
+    )
+
+    budget = ContextBudget.for_model(context_size)
+
     assembler = ContextAssembler(
+        budget=budget,
         counter=counter,
     )
 
@@ -133,6 +195,11 @@ async def create_runtime(
     llm = OllamaClient(
         model=config.llm.model,
         timeout=config.llm.timeout,
+        options=OllamaOptions(
+            # Keep the provider's window in step with the budget we
+            # enforce locally.
+            num_ctx=context_size,
+        ),
     )
 
     # Initialize Skills system
@@ -189,10 +256,20 @@ async def create_runtime(
     await plugin_manager.initialize_all()
     await plugin_manager.activate_all()
 
+    # MCP servers contribute tools through the same registry, so
+    # their permissions, approval gating and guardrails apply
+    # unchanged.
+    mcp_manager = MCPManager(
+        config.mcp,
+        registry,
+    )
+
+    await mcp_manager.connect_all()
+
     # Skills and plugins bring their own permissions. They are
     # granted for the session; mutating tools additionally set
     # requires_approval and are gated by ApprovalHook.
-    permissions = frozenset({
+    base_permissions = frozenset({
         "filesystem.read",
         "filesystem.write",
         "memory.read",
@@ -203,7 +280,11 @@ async def create_runtime(
         "skills.read",
         "skills.write",
         "plugins.read",
-    }) | plugin_manager.granted_permissions()
+    })
+
+    permissions = base_permissions | (
+        plugin_manager.granted_permissions()
+    ) | mcp_manager.granted_permissions()
 
     def current_task_id() -> str | None:
         anchor = agent.orchestrator.task_anchor
@@ -238,6 +319,9 @@ async def create_runtime(
             memory=memory,
             assembler=assembler,
             controller=controller,
+            # A subagent used to get ContextPolicy()'s default,
+            # which means no trimming at all.
+            subagent_max_messages=config.context.max_messages,
         )
 
         registry.register(subagents.tool)
@@ -262,4 +346,40 @@ async def create_runtime(
         paths=paths,
         config=config,
         plugin_manager=plugin_manager,
+        mcp_manager=mcp_manager,
+        base_permissions=base_permissions,
+        stats_store=(
+            stats_store
+            if stats_store is not None
+            else ToolStatsStore(paths.resolve(STATS_DATABASE))
+        ),
     )
+
+def _model_context_size(
+    catalog_path: Path,
+    model_name: str,
+) -> int | None:
+    """The model's declared context window, if the catalog knows it.
+
+    Used to size the context budget and Ollama's ``num_ctx`` so the
+    local budget and the provider agree. An unknown model falls back
+    to the default budget rather than guessing.
+    """
+
+    from agent_workflow.core.infrastructure.model_catalog import (
+        ModelCatalogLoader,
+    )
+
+    try:
+        catalog = ModelCatalogLoader().load(catalog_path)
+    except Exception:
+        return None
+
+    for model in catalog.models:
+        if model.name == model_name:
+            size = model.requirements.context_size
+
+            if size is not None and size > 0:
+                return int(size)
+
+    return None

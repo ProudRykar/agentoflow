@@ -6,6 +6,12 @@ from pathlib import Path
 from agent_workflow.core.context.context_assembler import ContextAssembler
 from agent_workflow.core.context.context_controller import ContextController
 from agent_workflow.core.entities.models.agent import Agent
+from agent_workflow.core.entities.models.context_manager import (
+    ContextManager,
+)
+from agent_workflow.core.entities.models.context_policy import (
+    ContextPolicy,
+)
 from agent_workflow.core.entities.models.builtin.subagent import (
     create_subagent_tool,
 )
@@ -62,6 +68,8 @@ class SubagentAgentFactory:
         assembler: ContextAssembler,
         controller: ContextController,
         options_by_model: dict[str, OllamaOptions],
+        subagent_max_messages: int | None = None,
+        subagent_max_iterations: int = 10,
     ) -> None:
         self._base_url = base_url
         self._timeout = timeout
@@ -70,6 +78,8 @@ class SubagentAgentFactory:
         self._assembler = assembler
         self._controller = controller
         self._options_by_model = options_by_model
+        self._subagent_max_messages = subagent_max_messages
+        self._subagent_max_iterations = subagent_max_iterations
 
     def create(
         self,
@@ -121,12 +131,26 @@ class SubagentAgentFactory:
             options=options,
         )
 
+        # A subagent gets its own controller and history: sharing the
+        # parent's meant a subagent rollover advanced the parent's
+        # window counter and wrote checkpoints into the parent's
+        # store under a foreign task id.
+        controller = ContextController(
+            budget=self._assembler.budget,
+            counter=self._assembler.counter,
+        )
+
         return Agent(
             llm=llm,
             registry=registry,
             executor=ToolExecutor(registry),
             assembler=self._assembler,
-            controller=self._controller,
+            controller=controller,
+            context_manager=ContextManager(
+                policy=ContextPolicy(
+                    max_messages=self._subagent_max_messages,
+                ),
+            ),
             memory=self._memory,
             run_id=run.run_id,
             parent_run_id=run.parent_run_id,
@@ -191,6 +215,7 @@ def build_subagent_stack(
     memory: MemoryManager | None,
     assembler: ContextAssembler,
     controller: ContextController,
+    subagent_max_messages: int | None = None,
 ) -> SubagentStack:
     catalog = ModelCatalogLoader().load(catalog_path)
 
@@ -219,6 +244,8 @@ def build_subagent_stack(
             assembler=assembler,
             controller=controller,
             options_by_model=options_by_model(catalog),
+            subagent_max_messages=subagent_max_messages,
+            subagent_max_iterations=subagent_config.max_iterations,
         ),
         model_router=router,
         config=subagent_config,

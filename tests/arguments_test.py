@@ -2,11 +2,11 @@
 
 import pytest
 
-from core.entities.models.arguments import (
+from agent_workflow.core.entities.models.arguments import (
     ArgumentDecoder,
     ArgumentDecoderError,
 )
-from core.entities.models.builtin.read_file import ReadFileInput
+from agent_workflow.core.entities.models.builtin.read_file import ReadFileInput
 from dataclasses import dataclass
 
 @pytest.fixture

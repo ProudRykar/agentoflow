@@ -133,6 +133,17 @@ class SchemaGenerator:
         self,
         field_type: type,
     ) -> dict[str, object]:
+        # An unconstrained value. MCP tools reach this whenever the
+        # remote schema declares no recognisable type, and Any is
+        # also how callers spell "pass it through". An empty schema
+        # is the honest JSON Schema for "anything goes"; rejecting it
+        # would let one remote tool break the tools API.
+        if field_type is Any or field_type is object:
+            return {}
+
+        if field_type is type(None):
+            return {"type": "null"}
+
         origin = get_origin(field_type)
 
         if origin in (Union, UnionType):
@@ -143,7 +154,15 @@ class SchemaGenerator:
             )
 
             if len(non_none_types) == 1 and len(args) == 2:
-                schema = self._type_to_schema(non_none_types[0])
+                inner = non_none_types[0]
+
+                # ``Any | None`` is still "anything", so an empty
+                # schema describes it better than a nullable type
+                # that does not exist.
+                if inner is Any or inner is object:
+                    return {}
+
+                schema = self._type_to_schema(inner)
                 schema["nullable"] = True
                 return schema
 

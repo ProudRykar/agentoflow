@@ -2,8 +2,8 @@ from typing import Any
 
 import pytest
 
-from core.entities.models.tool import Tool, ToolPolicy
-from core.entities.models.tool_registry import (
+from agent_workflow.core.entities.models.tool import Tool, ToolPolicy
+from agent_workflow.core.entities.models.tool_registry import (
     ToolRegistry,
     ToolRegistryError,
 )

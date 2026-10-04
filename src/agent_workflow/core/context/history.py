@@ -6,6 +6,8 @@ from typing import Protocol
 
 MAX_HISTORY_CONTENT_CHARS = 4_000
 
+DEFAULT_MAX_HISTORY_ITEMS = 2_000
+
 
 class HistoryKind(StrEnum):
     """What happened, at event granularity."""
@@ -138,12 +140,26 @@ class HistoryStore(Protocol):
 
 
 class InMemoryHistoryStore:
-    """In-memory HistoryStore. SQLite later, same protocol."""
+    """In-memory HistoryStore. SQLite later, same protocol.
 
-    def __init__(self) -> None:
+    Bounded on purpose: a session with a long tool loop used to grow
+    this without limit, since every call, result and phase change was
+    appended for the life of the session and nothing was ever
+    evicted.
+    """
+
+    def __init__(
+        self,
+        max_items: int = DEFAULT_MAX_HISTORY_ITEMS,
+    ) -> None:
         self._items: dict[str, HistoryItem] = {}
         self._order: list[str] = []
         self._counter: int = 0
+        self._max_items = max(1, max_items)
+
+    @property
+    def max_items(self) -> int:
+        return self._max_items
 
     def __len__(self) -> int:
         return len(self._items)
@@ -188,7 +204,26 @@ class InMemoryHistoryStore:
         self._items[item.item_id] = item
         self._order.append(item.item_id)
 
+        self._evict()
+
         return item
+
+    def _evict(self) -> None:
+        """Drop the oldest items down to the limit.
+
+        Oldest-first, because the recent tail is what the restore
+        selection and the assembler's history block actually use.
+        """
+
+        overflow = len(self._order) - self._max_items
+
+        if overflow <= 0:
+            return
+
+        for item_id in self._order[:overflow]:
+            self._items.pop(item_id, None)
+
+        del self._order[:overflow]
 
     def get(
         self,

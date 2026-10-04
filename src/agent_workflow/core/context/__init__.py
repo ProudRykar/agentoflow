@@ -21,7 +21,6 @@ from agent_workflow.core.context.checkpoint import (
 from agent_workflow.core.context.context_assembler import ContextAssembler
 from agent_workflow.core.context.context_budget import (
     ContextBudget,
-    ContextPriority,
 )
 from agent_workflow.core.context.context_controller import (
     ContextController,
@@ -67,7 +66,6 @@ __all__ = [
     "ContextBudget",
     "ContextController",
     "ContextItem",
-    "ContextPriority",
     "ContextSource",
     "ConversationManager",
     "Evidence",
