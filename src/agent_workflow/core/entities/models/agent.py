@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import inspect
+import json
 import time
 
 from collections.abc import Awaitable, Callable, Sequence
@@ -9,13 +12,25 @@ from typing import Any
 
 from agent_workflow.core.context.checkpoint import build_checkpoint
 from agent_workflow.core.context.context_assembler import ContextAssembler
+if TYPE_CHECKING:
+    # Annotation only: the import would be circular at runtime.
+    from agent_workflow.core.entities.models.skills.skill import Skill
+
+from agent_workflow.core.context.compaction import (
+    Compactor,
+    render_summary_block,
+)
 from agent_workflow.core.context.context_controller import ContextController
 from agent_workflow.core.context.context_item import ContextItem
 from agent_workflow.core.context.evidence import EvidenceReceipt
 from agent_workflow.core.context.history import HistoryKind
 
 
-from agent_workflow.core.context.memory import retrieve_snapshot
+from agent_workflow.core.context.memory import (
+    retrieve_snapshot,
+    retrieval_query,
+    visible_entries,
+)
 from agent_workflow.core.context.synthesis import build_synthesis_guide
 from agent_workflow.core.entities.models.agent_hook import AgentHook
 from agent_workflow.core.entities.models.agent_orchestrator import (
@@ -34,10 +49,17 @@ from agent_workflow.core.entities.models.agent_trace import (
     ToolFinished,
     ToolStarted,
 )
+from agent_workflow.core.entities.models.plan_event import plan_event
 from agent_workflow.core.entities.models.approval import ApprovalDeniedError
 from agent_workflow.core.entities.models.context_manager import ContextManager
 from agent_workflow.core.entities.models.guardrail_error import GuardrailDeniedError
+from agent_workflow.core.entities.models.run_usage import RunUsage
+from agent_workflow.core.entities.models.event_sink import emit_to
+from agent_workflow.core.entities.models.attempt_baseline import (
+    AttemptBaseline,
+)
 from agent_workflow.core.entities.models.llm import (
+    extract_usage,
     LLMResponse,
     LLMToolCall,
 )
@@ -60,10 +82,19 @@ from agent_workflow.core.entities.models.plugins.manager import PluginManager
 from agent_workflow.core.entities.models.skills.manager import SkillManager
 
 
+# A callback may be synchronous or asynchronous. ``on_event=list.append``
+# is the obvious thing to write, and demanding an ``Awaitable`` made it
+# fail at runtime with "object NoneType can't be used in 'await'
+# expression" -- a message about the wrong line entirely.
 EventCallback = Callable[
     [AgentEvent],
-    Awaitable[None],
+    Awaitable[None] | None,
 ]
+
+# How many recent calls the cycle check looks at. Small on purpose: a
+# longer window eventually matches two calls that merely resemble each
+# other from unrelated earlier work.
+_CYCLE_WINDOW = 4
 
 
 class Agent:
@@ -117,6 +148,9 @@ class Agent:
         context_manager: ContextManager | None = None,
         max_iterations: int = 10,
         max_tool_calls: int | None = None,
+        max_identical_failures: int = 2,
+        price_per_million: tuple[float, float] | None = None,
+        max_prompt_tokens: int | None = None,
         allowed_tools: frozenset[str] | None = None,
         hooks: Sequence[AgentHook] = (),
         *,
@@ -131,6 +165,7 @@ class Agent:
         memory: MemoryManager | None = None,
         skill_manager: SkillManager | None = None,
         plugin_manager: PluginManager | None = None,
+        compactor: Compactor | None = None,
     ) -> None:
         self._llm = llm
         self._registry = registry
@@ -148,10 +183,56 @@ class Agent:
 
         self._max_iterations = max_iterations
         self._max_tool_calls = max_tool_calls
+        self._max_identical_failures = max_identical_failures
+        # (prompt, completion) per million tokens. None unless the
+        # caller knows what it is paying; a guess here would be worse
+        # than no number, because it looks like a bill.
+        self._price_per_million = price_per_million
+        # A ceiling on measured prompt tokens for one run. max_iterations
+        # bounds the number of turns but not their size: a conversation
+        # that grows every turn reaches an expensive run long before the
+        # iteration cap, and a local run has no provider to bill.
+        self._max_prompt_tokens = max_prompt_tokens
+        self._max_identical_successes = max(
+            2, max_identical_failures
+        )
+        self._call_signatures: dict[str, int] = {}
+        # Successful repeats are counted separately: one is
+        # legitimate re-reading, several is a loop costing money.
+        self._repeated_calls: dict[str, int] = {}
+        # The recent order of calls, for cycle detection. Counted per
+        # call and not per signature: ping-ponging between two tools
+        # never repeats one signature often enough for the counters
+        # above to notice.
+        self._call_sequence: list[str] = []
+        self._cycles = 0
+        self._max_call_cycles = 2
+        # Held on the instance rather than as a loop local: the call is
+        # noted after the point where the next request is shaped, and a
+        # local set in one iteration is gone by the time the next one
+        # reads it.
+        self._cycling = False
+        # Measured tokens for this run. Provider-reported only,
+        # so a run with no usage data totals zero rather than
+        # claiming the estimate was measured.
+        self._usage = RunUsage()
+        # What the run being replaced had already gathered. A retry
+        # must start from the state before the discarded attempt, not
+        # inherit it: evidence it produced is evidence nobody asked to
+        # keep, and leaving it in satisfies a research contract with
+        # work the user has thrown away.
+        self._attempt_baseline: AttemptBaseline | None = None
         self._allowed_tools = allowed_tools
         self._hooks = tuple(hooks)
 
+        # A base for run ids, not an id for all time. Every turn mints
+        # its own, because one id for the whole session made a run
+        # record mean "this conversation" rather than "this attempt":
+        # per-turn usage could not be told apart, and a streaming flag
+        # for the current turn was cleared on every previous answer.
+        self._run_prefix = run_id or "run"
         self._run_id = run_id
+        self._run_counter = 0
         self._parent_run_id = parent_run_id
         self._agent_id = agent_id
         self._role = role
@@ -178,6 +259,9 @@ class Agent:
         self._memory = memory
         self._skill_manager = skill_manager
         self._plugin_manager = plugin_manager
+        # Optional: a runtime with no summariser configured keeps the
+        # old behaviour of dropping the window outright.
+        self._compactor = compactor
 
     # ==================================================================
     # Properties
@@ -351,11 +435,23 @@ class Agent:
         if anchor is None:
             return ()
 
-        entries = await self._memory.all()
+        # Read once and filter here rather than in the store: the store
+        # would have to know about task semantics, and the visibility
+        # rule is a property of retrieval, not of storage.
+        entries = visible_entries(
+            await self._memory.all(),
+            anchor.task_id,
+        )
+
+        if not entries:
+            return ()
 
         return retrieve_snapshot(
             entries,
-            f"{anchor.original_prompt} {anchor.objective}",
+            retrieval_query(
+                f"{anchor.original_prompt} {anchor.objective}",
+                self._context_manager.dialogue(),
+            ),
         ).items
 
     def _record_history(
@@ -455,8 +551,7 @@ class Agent:
         event: AgentEvent,
         on_event: EventCallback | None,
     ) -> None:
-        if on_event is not None:
-            await on_event(event)
+        await emit_to(on_event, event)
 
     async def _emit_phase_transition(
         self,
@@ -477,6 +572,14 @@ class Agent:
             ),
             on_event,
         )
+
+        # Most of these transitions are the plan moving: a tool
+        # finishing advances the step, synthesis opens one, completion
+        # closes the last. Emitting the plan here rather than at each
+        # call site means a new transition site cannot forget to report
+        # the plan, which is how the plan would end up a phase behind
+        # in the UI.
+        await self._emit_plan(on_event)
 
         self._record_history(
             HistoryKind.PHASE_CHANGE,
@@ -542,6 +645,74 @@ class Agent:
     # Public execution
     # ==================================================================
 
+    def _capture_baseline(self) -> None:
+        """Record the state a retry would have to return to."""
+
+        coverage = (
+            self._orchestrator.task_progress.research_coverage
+        )
+
+        self._attempt_baseline = AttemptBaseline(
+            evidence_ids=(
+                self._orchestrator.evidence_store.ids
+            ),
+            fetched_urls=frozenset(coverage.fetched_urls),
+            failed_urls=frozenset(coverage.failed_urls),
+            discovered_urls=frozenset(
+                coverage.discovered_urls
+            ),
+            max_depth_reached=coverage.max_depth_reached,
+            total_bytes=coverage.total_bytes,
+            research_completed=(
+                self._orchestrator.task_progress.research_completed
+            ),
+        )
+
+    def _restore_baseline(self) -> None:
+        """Undo the discarded attempt's research.
+
+        Research only. The plan keeps its completed steps: a retry of
+        the wording should not also throw away the research that got
+        the answer right in the first place.
+        """
+
+        baseline = self._attempt_baseline
+
+        if baseline is None:
+            return
+
+        self._orchestrator.evidence_store.retain_only(
+            baseline.evidence_ids
+        )
+
+        progress = self._orchestrator.task_progress
+
+        coverage = progress.research_coverage
+
+        coverage.fetched_urls = set(baseline.fetched_urls)
+        coverage.failed_urls = set(baseline.failed_urls)
+        coverage.discovered_urls = set(
+            baseline.discovered_urls
+        )
+        coverage.max_depth_reached = baseline.max_depth_reached
+        coverage.total_bytes = baseline.total_bytes
+
+        progress.research_completed = baseline.research_completed
+
+    def _mint_run_id(self) -> str:
+        """A run id for the turn about to start.
+
+        Counted rather than random: a replay of the event log should
+        reproduce the same ids, and a test asserting on them should not
+        have to match a uuid.
+        """
+
+        self._run_counter += 1
+
+        self._run_id = f"{self._run_prefix}-{self._run_counter}"
+
+        return self._run_id
+
     async def run(
         self,
         prompt: str,
@@ -561,6 +732,10 @@ class Agent:
         self._prepare_task_contract(
             task_contract,
         )
+
+        self._mint_run_id()
+
+        self._capture_baseline()
 
         self._orchestrator.set_run_id(
             self._run_id,
@@ -639,6 +814,10 @@ class Agent:
         self._prepare_task_contract(
             task_contract,
         )
+
+        self._mint_run_id()
+
+        self._capture_baseline()
 
         self._orchestrator.set_run_id(
             self._run_id,
@@ -736,6 +915,103 @@ class Agent:
             on_event=on_event,
         )
 
+    async def regenerate(
+        self,
+        context: ToolContext,
+        on_event: EventCallback | None = None,
+        hint: str = "",
+    ) -> str:
+        """Answer the last question again, differently.
+
+        The user asked for the answer and got one they did not want.
+        Resending the same question as a new message would put both in
+        the conversation and leave the model treating the discarded
+        attempt as context it should stay consistent with -- so it
+        argues with itself instead of trying again. The attempt is
+        therefore removed first, and the same anchor is reused: same
+        task, same prepared work, one more attempt at the answer.
+
+        ``hint`` says what to change ("shorter", "cite the source").
+        It is recorded as the user's turn so it takes part in later
+        context selection rather than being a one-off injection.
+
+        Raises RuntimeError when the last thing said was the user's,
+        since there is then no answer to replace -- re-answering is
+        ``continue_run`` with the hint, and going through here would
+        silently delete the user's own message.
+        """
+
+        dropped = self._context_manager.drop_trailing_assistant()
+
+        if not dropped:
+            raise RuntimeError(
+                "Nothing to regenerate: the last message is not an "
+                "assistant answer"
+            )
+
+        self._orchestrator.set_run_id(self._run_id)
+
+        # A new run on the same anchor, not a resume: the previous run
+        # finished, and the orchestrator is right to refuse resuming a
+        # completed one. The question is whatever the user last asked,
+        # since that is what is being answered again.
+        self._restore_baseline()
+
+        self._mint_run_id()
+
+        self._capture_baseline()
+
+        question = self._last_user_message()
+
+        transition = self._orchestrator.on_agent_started(
+            prompt=question,
+            run_id=self._run_id,
+        )
+
+        await self._emit_phase_transition(transition, on_event)
+
+        if hint:
+            self._context_manager.add_user_message(hint)
+            self._record_history(
+                HistoryKind.USER_MESSAGE,
+                hint,
+            )
+
+        await self._emit(
+            AgentStarted(
+                prompt=question,
+                run_id=self._run_id,
+                parent_run_id=self._parent_run_id,
+                agent_id=self._agent_id,
+                role=self._role,
+                model=self._model,
+                regenerated=True,
+            ),
+            on_event,
+        )
+
+        return await self._run_loop(
+            context=replace(
+                context,
+                event_callback=on_event,
+                run_id=self._run_id,
+                parent_run_id=self._parent_run_id,
+            ),
+            on_event=on_event,
+        )
+
+    def _last_user_message(self) -> str:
+        """The last thing the user said, for the run transition."""
+
+        for message in reversed(self._context_manager.dialogue()):
+            if message.get("role") == "user":
+                content = message.get("content")
+
+                if isinstance(content, str):
+                    return content
+
+        return ""
+
     def clear_context(self) -> None:
         self._context_manager.clear()
 
@@ -796,6 +1072,51 @@ class Agent:
         )
 
         return skill
+
+    async def _compact_window(
+        self,
+        *,
+        instruction: str = "",
+    ):
+        """Summarise the window the budget is about to drop.
+
+        Returns None when compaction is off or there is nothing worth
+        summarising. A failure propagates: carrying on without a
+        summary is the amnesia this replaces, and silently degrading
+        would hide it.
+        """
+
+        if not self._compactor:
+            return None
+
+        messages = self._context_manager.dialogue()
+
+        if not messages:
+            return None
+
+        return await self._compactor.compact(
+            list(messages),
+            instruction=instruction,
+        )
+
+    def _seed_compaction(
+        self,
+        compaction,
+    ) -> None:
+        """Put the handover note at the head of the fresh window."""
+
+        block = render_summary_block(
+            compaction.summary,
+            messages_compacted=compaction.messages_compacted,
+            tokens_before=compaction.tokens_before,
+        )
+
+        self._context_manager.add_message(
+            {
+                "role": "user",
+                "content": block,
+            }
+        )
 
     def get_active_skill_instructions(self) -> str:
         """Get concatenated instructions of all active skills."""
@@ -929,6 +1250,32 @@ class Agent:
             on_event,
         )
 
+    async def _emit_plan(
+        self,
+        on_event: EventCallback | None,
+    ) -> None:
+        """Publish the plan, or say there is none.
+
+        Emitting unconditionally would flood the socket with a no-op on
+        every iteration for runs that never planned anything, so an
+        absent plan returns quietly.
+        """
+
+        plan = self._orchestrator.plan
+
+        if plan is None:
+            return
+
+        await self._emit(
+            plan_event(
+                plan,
+                self._run_id,
+                self._parent_run_id,
+                todo_list=self._orchestrator.todo_list,
+            ),
+            on_event,
+        )
+
     # ==================================================================
     # Main loop
     # ==================================================================
@@ -946,8 +1293,12 @@ class Agent:
         tools = self._build_tools()
 
         tool_calls_used = 0
+        repeat_detected = False
+        repeated_success = False
+        self._usage = RunUsage()
 
         completion_gate_instruction: str | None = None
+        consolidation_note: str | None = None
 
         guide_revision_done = False
 
@@ -955,6 +1306,20 @@ class Agent:
             1,
             self._max_iterations + 1,
         ):
+            # ----------------------------------------------------------
+            # Budget.
+            #
+            # Checked before the request, not after: the whole point is
+            # to avoid spending the tokens that would take it over.
+            # Stops with the run's own accounting attached, because
+            # "stopped for budget" without a number is not actionable.
+            # ----------------------------------------------------------
+
+            if self._budget_exceeded():
+                return await self._stop_for_budget(
+                    on_event,
+                )
+
             # ----------------------------------------------------------
             # Phase: LLM requested
             # ----------------------------------------------------------
@@ -994,6 +1359,7 @@ class Agent:
                 ),
                 memory_snapshot=memory_snapshot,
                 research=self._orchestrator.research_context,
+                consolidation_note=consolidation_note,
                 completion_instruction=(
                     completion_gate_instruction
                 ),
@@ -1001,6 +1367,7 @@ class Agent:
                     self._orchestrator,
                 ),
                 execution_plan=self._orchestrator.plan,
+                todo_list=self._orchestrator.todo_list,
                 history_selected=history_selected,
                 tools=tools,
                 skill_instructions=self.get_active_skill_instructions(),
@@ -1015,10 +1382,22 @@ class Agent:
             # ------------------------------------------------------
 
             if self._controller.is_over_budget(request):
+                # Compacted before the window is cleared. Rollover on
+                # own throws the dialogue away, so a long run
+                # reaches its limit and then behaves as if it had just
+                # started. The note is written first, while the
+                # messages it describes still exist.
+                compaction = await self._compact_window(
+                    instruction=_trailing_text(request),
+                )
+
                 rollover = self._controller.rollover(
                     self._orchestrator,
                     self._context_manager,
                 )
+
+                if compaction is not None and compaction.summary:
+                    self._seed_compaction(compaction)
 
                 history_selected = (
                     rollover.history_context
@@ -1038,11 +1417,13 @@ class Agent:
                     ),
                     memory_snapshot=memory_snapshot,
                     research=self._orchestrator.research_context,
-                    completion_instruction=(
+                    consolidation_note=consolidation_note,
+                completion_instruction=(
                         completion_gate_instruction
                     ),
                     checkpoint=rollover.checkpoint,
                     execution_plan=self._orchestrator.plan,
+                    todo_list=self._orchestrator.todo_list,
                     history_selected=history_selected,
                     tools=tools,
                     skill_instructions=self.get_active_skill_instructions(),
@@ -1063,6 +1444,16 @@ class Agent:
                         self._controller.request_tokens(
                             request,
                         )
+                    ),
+                    context_limit=self._controller.budget.available,
+                    context_trimmed=request.trimmed,
+                    counter_exact=getattr(
+                        self._controller.counter,
+                        "exact",
+                        True,
+                    ),
+                    dropped_blocks=tuple(
+                        request.dropped_blocks or ()
                     ),
                 ),
                 on_event,
@@ -1153,6 +1544,13 @@ class Agent:
                     on_event,
                 )
 
+                # Asked once, not on every synthesis turn: repeated, it
+                # turns "record what you learned" into something the
+                # model satisfies by writing a note per turn until the
+                # store is noise.
+                if synthesis_transition is not None:
+                    consolidation_note = CONSOLIDATION_NOTE
+
                 # ------------------------------------------------------
                 # Completion
                 # ------------------------------------------------------
@@ -1167,6 +1565,18 @@ class Agent:
                 )
 
                 if self._orchestrator.state.finished:
+                    # The finished answer goes into the conversation.
+                    # Without it the next turn shows the model two
+                    # consecutive user messages and no trace of its own
+                    # reply, so "why?" and "shorten that" have nothing to
+                    # refer to -- and there is no answer to regenerate.
+                    self._context_manager.add_assistant_message(
+                        {
+                            "role": "assistant",
+                            "content": result,
+                        },
+                    )
+
                     await self._emit(
                         AgentFinished(
                             result=result,
@@ -1175,6 +1585,17 @@ class Agent:
                             agent_id=self._agent_id,
                             role=self._role,
                             model=self._model,
+                            prompt_tokens=self._usage.prompt_tokens,
+                            completion_tokens=(
+                                self._usage.completion_tokens
+                            ),
+                            llm_calls=self._usage.calls,
+                            llm_calls_without_usage=(
+                                self._usage.calls_without_usage
+                            ),
+                            estimated_cost=self._usage.estimate_cost(
+                                self._price_per_million
+                            ),
                         ),
                         on_event,
                     )
@@ -1221,7 +1642,104 @@ class Agent:
                 ),
             )
 
-            completion_gate_instruction = None
+            # Once the same call has failed repeatedly, the next
+            # request is built without tools: the model has to
+            # answer in prose instead of trying the same thing again.
+            # An instruction alone is not enough, because a model
+            # that is stuck often ignores it.
+            if repeat_detected and self._call_signatures:
+                completion_gate_instruction = (
+                    self._repeat_instruction()
+                )
+                tools = ()
+            elif self._cycling:
+                # Ahead of the repeated-success warning on purpose. A
+                # cycle is almost always *also* a set of repeats, and
+                # the softer notice would win the branch every time,
+                # so a genuine loop was never told what it was doing.
+                # Answer-only, like the failure loop: a cycle will not
+                # break itself, and each further turn makes the context
+                # worse.
+                completion_gate_instruction = (
+                    self._cycle_instruction()
+                )
+                tools = ()
+            elif repeated_success:
+                # Told, not stopped. A repeated successful call is
+                # warned about but still answered, because re-reading
+                # after acting is legitimate; and it deliberately does
+                # not feed the abort machinery above, which belongs to
+                # the failure loop and changes when a run ends.
+                completion_gate_instruction = (
+                    self._repeat_success_instruction()
+                )
+            else:
+                completion_gate_instruction = None
+
+            if self._cycling:
+                # Consumed. Left set, it would withdraw tools again on
+                # every later turn of this run, including after the
+                # model had moved on to different work.
+                self._cycling = False
+
+            # Failure loop only. A cycle already had its tools
+            # withdrawn above, and aborting here instead would end the
+            # run before the model ever saw the explanation -- it would
+            # be told "stop calling tools" only by the refusal, never by
+            # the request that carried no tools to begin with.
+            if (
+                repeat_detected
+                and self._call_signatures
+                and response.tool_calls
+            ):
+                # The model asked to retry anyway. Executing it
+                # again is what produced the loop, so refuse and make
+                # it speak instead: one more turn with no tools, and
+                # if it still insists, the run ends with what we have.
+                await self._emit(
+                    ToolFinished(
+                        iteration=iteration,
+                        # The id from *this* response. Referencing
+                        # the loop variable leaked a stale id from an
+                        # earlier turn, so the synthetic card could
+                        # not be matched to the call it describes.
+                        tool_call_id=response.tool_calls[0].id,
+                        tool_name=response.tool_calls[0].name,
+                        output=None,
+                        error_code="repeat_blocked",
+                        error_message=(
+                            "This exact call already failed "
+                            "repeatedly and was not retried."
+                        ),
+                        run_id=self._run_id,
+                        parent_run_id=self._parent_run_id,
+                    ),
+                    on_event,
+                )
+
+                repeat_detected = False
+                repeated_success = False
+                self._reset_repeats()
+
+                final = await self._final_answer(
+                    iteration,
+                    messages,
+                    on_event,
+                )
+
+                await self._emit(
+                    AgentFinished(
+                        result=final,
+                        run_id=self._run_id,
+                        parent_run_id=self._parent_run_id,
+                        agent_id=self._agent_id,
+                        role=self._role,
+                        model=self._model,
+                    ),
+                    on_event,
+                )
+
+                return final
 
             # ----------------------------------------------------------
             # Execute tools
@@ -1450,6 +1968,19 @@ class Agent:
                         + ", ".join(receipt.evidence_ids),
                         reference=tool_call.id,
                     )
+
+                    if result.error is not None:
+                        if self._note_failed_call(tool_call):
+                            repeat_detected = True
+
+                    else:
+                        self._clear_call_signatures()
+                        repeat_detected = False
+
+                        if self._note_repeat_call(tool_call):
+                            repeated_success = True
+
+                        self._note_call_sequence(tool_call)
                 else:
                     self._context_manager.add_tool_result(
                         self._tool_message(
@@ -1472,6 +2003,28 @@ class Agent:
                         reference=tool_call.id,
                     )
 
+                    if result.error is not None:
+                        if self._note_failed_call(tool_call):
+                            repeat_detected = True
+                    else:
+                        # A success means the agent is making
+                        # progress; the budget starts over.
+                        self._clear_call_signatures()
+                        repeat_detected = False
+
+                        if self._note_repeat_call(tool_call):
+                            repeated_success = True
+
+                        self._note_call_sequence(tool_call)
+
+                        if tool_call.name == "todowrite":
+                            # The checklist is part of the plan
+                            # surface, so the panel has to see it now
+                            # rather than at the next phase change --
+                            # which for a long research run could be
+                            # many turns away.
+                            await self._emit_plan(on_event)
+
         # ==================================================================
         # Maximum iterations
         # ==================================================================
@@ -1492,9 +2045,307 @@ class Agent:
             error_message,
         )
 
+    async def _final_answer(
+        self,
+        iteration: int,
+        messages: list[dict[str, Any]],
+        on_event: EventCallback | None,
+    ) -> str:
+        """Ask for a tool-free answer, then fall back to a report.
+
+        The loop has to end with something the user can read. A
+        model that will not answer is described rather than retried,
+        because retrying is what caused the loop.
+        """
+
+        instruction = self._repeat_instruction()
+
+        summary = instruction + (
+            " Respond now with the final answer only. Do not request "
+            "any tool."
+        )
+
+        try:
+            response = await self._chat_llm(
+                iteration=iteration,
+                messages=[
+                    *messages,
+                    {"role": "user", "content": summary},
+                ],
+                tools=(),
+                on_event=on_event,
+            )
+        except Exception as exc:
+            return (
+                "The tool call failed repeatedly and the model could "
+                f"not produce a final answer: {exc}"
+            )
+
+        text = (response.content or "").strip()
+
+        if text:
+            return text
+
+        return (
+            "The tool call failed repeatedly and the model produced no "
+            "answer. The failing call was not retried again."
+        )
+
+    def _note_repeat_call(
+        self,
+        tool_call: Any,
+    ) -> bool:
+        """Track a *successful* identical call; True once it repeats.
+
+        The failure guard exists because an agent stuck on an error
+        retries forever. The mirror case was unguarded: a call that
+        succeeds can be repeated exactly as often, and each repeat is
+        a real request, real tokens and a real slot in the context,
+        carrying back an answer the model has already read.
+
+        Not an error -- re-reading something after acting on it is
+        legitimate -- so this only warns once the same request has come
+        back unchanged several times, and lets the model explain why it
+        wants it again.
+        """
+
+        signature = f"{tool_call.name}:{_stable(tool_call.arguments)}"
+
+        self._repeated_calls[signature] = (
+            self._repeated_calls.get(signature, 0) + 1
+        )
+
+        return (
+            self._repeated_calls[signature]
+            >= self._max_identical_successes
+        )
+
+    def _note_call_sequence(
+        self,
+        tool_call: Any,
+    ) -> bool:
+        """Track the *order* of calls, not just each one alone.
+
+        The existing guard counts a call against itself, so A, B, A, B
+        looks like four first-time calls: each individual signature has
+        been seen twice, but never three times, and a genuinely stuck
+        agent ping-ponging between two tools walks straight through.
+        Each pass costs a request and pushes the previous one out of
+        the context window, so the loop gets tighter rather than
+        shorter.
+
+        An immediate return to the previous call is the signal. One
+        bounce is ordinary -- checking a result, then adjusting -- so
+        it takes two consecutive bounces to call it a cycle.
+        """
+
+        signature = f"{tool_call.name}:{_stable(tool_call.arguments)}"
+
+        self._call_sequence.append(signature)
+
+        # Only the tail matters; a full history would eventually match
+        # two calls that merely resemble each other from earlier work.
+        if len(self._call_sequence) > _CYCLE_WINDOW:
+            del self._call_sequence[:-_CYCLE_WINDOW]
+
+        if len(self._call_sequence) < 3:
+            return False
+
+        if (
+            self._call_sequence[-1]
+            == self._call_sequence[-3]
+            and self._call_sequence[-1] != self._call_sequence[-2]
+        ):
+            self._cycles += 1
+        else:
+            self._cycles = 0
+
+        self._cycling = self._cycles >= self._max_call_cycles
+
+        return self._cycling
+
+    def _cycle_instruction(self) -> str:
+        """Name the cycle the model is in, since it cannot see it."""
+
+        recent = list(self._call_sequence[-_CYCLE_WINDOW:])
+
+        return (
+            "TOOL CALL CYCLE DETECTED: recent tool calls are "
+            f"{' -> '.join(recent)}. That pattern repeats without "
+            "progress, and each pass costs a request and pushes the "
+            "previous results out of your context.\n\n"
+            "Stop cycling. Either commit to the best answer you have "
+            "from what you already fetched, or state plainly what you "
+            "are missing and what would resolve it."
+        )
+
+    def _repeat_success_instruction(self) -> str:
+        """Explain that the same answer is already in hand."""
+
+        return (
+            "REPEATED CALL: you have already made this exact call and "
+            "received its result, which is still in this conversation. "
+            "Running it again returns the same thing at the cost of "
+            "another request and more context.\n\n"
+            "If you are calling it again because you meant to change "
+            "something -- different arguments, a narrower query, a "
+            "different tool -- do that instead. If you genuinely need "
+            "it repeated, say why in your next message."
+        )
+
+    def _note_failed_call(self, tool_call: Any) -> bool:
+        """Track a failed call; True once it is clearly a repeat.
+
+        The agent had no signal that it was retrying the same
+        request, so a tool that kept returning the same error was
+        called again every iteration until the iteration cap aborted
+        the run. Counting identical (tool, arguments) pairs that
+        failed the same way turns that into an instruction the model
+        can act on.
+        """
+
+        signature = f"{tool_call.name}:{_stable(tool_call.arguments)}"
+
+        self._call_signatures[signature] = (
+            self._call_signatures.get(signature, 0) + 1
+        )
+
+        return (
+            self._call_signatures[signature]
+            >= self._max_identical_failures
+        )
+
+    def _repeat_instruction(self) -> str:
+        """Tell the model to stop retrying and answer instead."""
+
+        return (
+            "TOOL FAILURE LOOP DETECTED: the same tool call with the "
+            "same arguments has now failed repeatedly with the same "
+            "error. Retrying it again cannot succeed. Do not issue "
+            "that call once more. Either use a different tool, change "
+            "the arguments materially, or stop and report to the user "
+            "what failed, which error you received, and what you "
+            "could not accomplish."
+        )
+
+    def _clear_call_signatures(self) -> None:
+        """Reset the *failure* counter only.
+
+        Called after every success, because a success means the agent
+        is making progress. It must not touch the repeat counter: that
+        one is precisely about calls that succeeded.
+        """
+
+        self._call_signatures.clear()
+
+    def _budget_exceeded(self) -> bool:
+        """
+        Whether this run has spent its token allowance.
+
+        Prompt tokens are the thing that grows, and they are charged
+        again on every call, so they are the only figure worth
+        ceiling. Returns False when no ceiling is set, and when
+        nothing has been measured -- an unmeasured run cannot be shown
+        to have exceeded anything, and pretending otherwise would stop
+        every provider that reports no usage.
+        """
+
+        if self._max_prompt_tokens is None:
+            return False
+
+        if not self._usage.measured:
+            return False
+
+        return self._usage.prompt_tokens >= self._max_prompt_tokens
+
+    def _budget_stop_message(self) -> str:
+        return (
+            f"Stopped: this run reached its prompt-token allowance "
+            f"of {self._max_prompt_tokens:,} "
+            f"(used {self._usage.prompt_tokens:,}). "
+            "Raise agent.max_prompt_tokens, or ask for a narrower "
+            "task."
+        )
+
+    async def _stop_for_budget(
+        self,
+        on_event: EventCallback | None,
+    ) -> str:
+        """End the run on the token ceiling, accounting attached."""
+
+        message = self._budget_stop_message()
+
+        await self._emit(
+            AgentFinished(
+                result=message,
+                run_id=self._run_id,
+                parent_run_id=self._parent_run_id,
+                agent_id=self._agent_id,
+                role=self._role,
+                model=self._model,
+                prompt_tokens=self._usage.prompt_tokens,
+                completion_tokens=(
+                    self._usage.completion_tokens
+                ),
+                llm_calls=self._usage.calls,
+                llm_calls_without_usage=(
+                    self._usage.calls_without_usage
+                ),
+                estimated_cost=self._usage.estimate_cost(
+                    self._price_per_million
+                ),
+            ),
+            on_event,
+        )
+
+        return message
+
+    def _reset_repeats(self) -> None:
+        """Reset the per-signature counters at a turn boundary.
+
+        Repeats are counted within a turn. The same call made again in
+        the next turn is the agent coming back to something it decided
+        to revisit, which is a decision rather than a loop.
+
+        The call *sequence* is deliberately not reset here. A cycle is
+        by definition several turns long, so clearing its window at the
+        boundary would make it impossible to detect.
+        """
+
+        self._reset_cycles()
+
+        self._call_signatures.clear()
+        self._repeated_calls.clear()
+
+    def _reset_cycles(self) -> None:
+        """Forget the call pattern. Turn boundary only."""
+
+        self._call_sequence.clear()
+        self._cycles = 0
+        self._cycling = False
+
     # ==================================================================
     # LLM
     # ==================================================================
+
+    def _estimate_request(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> int:
+        """What we think the request costs, for comparison with usage.
+
+        Estimated from exactly the messages being sent, so the ratio
+        against the provider's figure is meaningful rather than two
+        unrelated numbers.
+        """
+
+        return sum(
+            self._controller.counter.count(
+                str(message.get("content", ""))
+            )
+            + 16
+            for message in messages
+        )
 
     async def _stream_llm(
         self,
@@ -1643,6 +2494,13 @@ class Agent:
                 if raw_chunks
                 else {}
             ),
+            # The streaming path is the one most runs take, so the
+            # provider's count has to be read here too: measured only
+            # on the non-streaming path would have made the meter look
+            # estimated on every ordinary run.
+            usage=extract_usage(
+                raw_chunks[-1] if raw_chunks else {}
+            ),
         )
 
         await self._emit(
@@ -1655,9 +2513,30 @@ class Agent:
                 ),
                 run_id=self._run_id,
                 parent_run_id=self._parent_run_id,
+                # Next to the estimate for the same request: their
+                # ratio is the only honest measure of whether the
+                # budget arithmetic can be relied on.
+                prompt_tokens=(
+                    response.usage.prompt_tokens
+                    if response.usage is not None
+                    else None
+                ),
+                completion_tokens=(
+                    response.usage.completion_tokens
+                    if response.usage is not None
+                    else None
+                ),
+                estimated_prompt_tokens=self._estimate_request(
+                    messages
+                ),
             ),
             on_event,
         )
+
+        if response.usage is None:
+            self._usage.note_unreported()
+        else:
+            self._usage.add(response.usage)
 
         return response
 
@@ -1743,9 +2622,30 @@ class Agent:
                 ),
                 run_id=self._run_id,
                 parent_run_id=self._parent_run_id,
+                # Next to the estimate for the same request: their
+                # ratio is the only honest measure of whether the
+                # budget arithmetic can be relied on.
+                prompt_tokens=(
+                    response.usage.prompt_tokens
+                    if response.usage is not None
+                    else None
+                ),
+                completion_tokens=(
+                    response.usage.completion_tokens
+                    if response.usage is not None
+                    else None
+                ),
+                estimated_prompt_tokens=self._estimate_request(
+                    messages
+                ),
             ),
             on_event,
         )
+
+        if response.usage is None:
+            self._usage.note_unreported()
+        else:
+            self._usage.add(response.usage)
 
         return response
 
@@ -1795,3 +2695,58 @@ class Agent:
             "tool_call_id": tool_call_id,
             "content": content,
         }
+
+def _stable(value: Any) -> str:
+    """A deterministic, order-independent rendering of arguments.
+
+    Two calls that differ only in key order must count as the same
+    retry, or a model that reorders its JSON would escape the guard.
+    """
+
+    try:
+        return json.dumps(
+            value,
+            sort_keys=True,
+            default=str,
+        )
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _trailing_text(request) -> str:
+    """The instruction the user just gave, for the summary prompt.
+
+    Taken from the assembled request rather than the dialogue because
+    the window usually ends with a tool result at rollover time, and
+    the last message is not the thing being asked for.
+    """
+
+    for message in reversed(request.to_message_list()):
+        if message.get("role") != "user":
+            continue
+
+        content = message.get("content")
+
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("text"):
+                    return str(block["text"]).strip()
+
+    return ""
+
+
+CONSOLIDATION_NOTE = """\
+[BEFORE YOU ANSWER]
+
+You are about to finish. If this session worked out something that \
+took more than one attempt to learn -- a rule of a system, a \
+convention of a codebase, a fact you had to try twice to get -- save \
+it now with the remember tool, before you write your answer.
+
+Nothing to save is a fine answer. Do not save the values of \
+variables, tool output you could fetch again, or anything already \
+stated in this conversation. If you did not learn anything, skip \
+this and answer."""

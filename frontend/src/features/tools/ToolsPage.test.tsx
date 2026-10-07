@@ -36,16 +36,62 @@ const ONE_SERVER = {
   connected_servers: 1,
 }
 
+interface StubTool {
+  name: string
+  description: string
+  source: string
+  enabled?: boolean
+  permissions: string[]
+  missing_permissions: string[]
+  requires_approval: boolean
+  timeout: number
+  max_output_size: number
+  parameters: unknown[]
+  required_parameters: string[]
+  mcp_server: string | null
+  stats: Record<string, unknown>
+}
+
 interface Stub {
   mcp: unknown
   calls: [string, string | undefined, string | undefined][]
+  tools: {
+    tools: StubTool[]
+    summary?: Record<string, unknown>
+    disabled?: string[]
+  }
+}
+
+function stubTool(name: string, enabled?: boolean): StubTool {
+  return {
+    name,
+    description: `the ${name} tool`,
+    source: 'builtin',
+    ...(enabled === undefined ? {} : { enabled }),
+    permissions: [],
+    missing_permissions: [],
+    requires_approval: false,
+    timeout: 1,
+    max_output_size: 10,
+    parameters: [],
+    required_parameters: [],
+    mcp_server: null,
+    stats: {
+      calls: 0,
+      errors: 0,
+      running: 0,
+      average_duration: null,
+      last_used: null,
+      error_rate: 0,
+    },
+  }
 }
 
 function stubFetch(
   initial: unknown = EMPTY_MCP,
   failSave = false,
 ): Stub {
-  const state: Stub = { mcp: initial, calls: [] }
+  const state: Stub = { mcp: initial, calls: [], tools: { tools: [] } }
 
   vi.stubGlobal(
     'fetch',
@@ -82,22 +128,28 @@ function stubFetch(
         }
 
         if (url.includes('/tools')) {
+          state.tools = {
+            summary: {
+              total_calls: 0,
+              total_successes: 0,
+              total_failures: 0,
+              error_rate: 0,
+              registered_tools: state.tools.tools.length,
+              tools_used: 0,
+              total_errors: 0,
+              approvals_requested: 0,
+              approvals_denied: 0,
+            },
+            tools: state.tools.tools,
+            disabled: state.tools.tools
+              .filter((tool) => tool.enabled === false)
+              .map((tool) => tool.name),
+          }
+
           return {
             ok: true,
             status: 200,
-            json: async () => ({
-              summary: {
-                total_calls: 0,
-                total_successes: 0,
-                total_failures: 0,
-                error_rate: 0,
-              },
-              tools: [],
-              servers: [],
-              skills: [],
-              plugins: [],
-              mcp: { enabled: false, servers: [] },
-            }),
+            json: async () => state.tools,
           } as Response
         }
 
@@ -145,6 +197,15 @@ async function openMcpTab() {
   await screen.findByRole('button', { name: /MCP/ })
 
   await userEvent.click(screen.getByRole('button', { name: /MCP/ }))
+}
+
+/** Tools is the default tab, so no click is needed. */
+async function renderToolsTab(): Promise<void> {
+  render(
+    <ToolsPage sessionId="session-1" refreshKey={0} />,
+  )
+
+  await screen.findByRole('button', { name: /Tools/ })
 }
 
 afterEach(() => {
@@ -301,6 +362,43 @@ describe('ToolsPage MCP tab', () => {
     expect(
       screen.getByRole('button', { name: 'Remove' }),
     ).toBeInTheDocument()
+  })
+
+  it('shows a configuration warning from the backend', async () => {
+    stubFetch({
+      ...ONE_SERVER,
+      servers: [
+        {
+          ...ONE_SERVER.servers[0],
+          warnings: [
+            "Server 'podman' is a container runtime, but its " +
+              'arguments pass no -e/--env flag, so ' +
+              'STASH_ENDPOINT will not reach the container.',
+          ],
+        },
+      ],
+    })
+
+    await openMcpTab()
+
+    expect(
+      await screen.findByText(/will not reach the container/),
+    ).toBeInTheDocument()
+  })
+
+  it('renders a server whose response predates warnings', async () => {
+    // An older backend omits the field entirely; the page must still
+    // work instead of throwing on undefined.map.
+    const legacy = {
+      ...ONE_SERVER,
+      servers: [{ ...ONE_SERVER.servers[0], warnings: undefined }],
+    }
+
+    stubFetch(legacy)
+
+    await openMcpTab()
+
+    expect(await screen.findByText('stash')).toBeInTheDocument()
   })
 
   it('warns when saving over an existing server', async () => {
@@ -484,5 +582,67 @@ describe('ToolsPage MCP edit', () => {
     expect(
       screen.getByRole('button', { name: 'Add server' }),
     ).toBeInTheDocument()
+  })
+})
+
+describe('ToolsPage tool switching', () => {
+  it('shows a disabled tool as off and unchecked', async () => {
+    const stub = stubFetch()
+
+    stub.tools.tools = [stubTool('alpha', false)]
+
+    await renderToolsTab()
+
+    await screen.findByText('alpha')
+
+    const toggle = screen.getByLabelText('Enable alpha')
+
+    expect(toggle).not.toBeChecked()
+
+    // The chip marks the row; the switch label repeats the word, so
+    // the assertion is scoped rather than a bare text match.
+    expect(
+      document.querySelector('.chip-off')?.textContent,
+    ).toBe('off')
+
+    expect(screen.getByText(/1 tool off/i)).toBeTruthy()
+  })
+
+  it('treats a missing enabled field as on', async () => {
+    // An older backend omits the field; absent must mean enabled
+    // rather than throwing on undefined.length.
+    const stub = stubFetch()
+
+    stub.tools.tools = [stubTool('legacy')]
+
+    await renderToolsTab()
+
+    await screen.findByText('legacy')
+
+    expect(screen.getByLabelText('Enable legacy')).toBeChecked()
+  })
+
+  it('posts the toggle with an encoded tool name', async () => {
+    const stub = stubFetch()
+
+    stub.tools.tools = [stubTool('mcp_stash_get_tags', true)]
+
+    await renderToolsTab()
+
+    await screen.findByText('mcp_stash_get_tags')
+
+    await userEvent.click(
+      screen.getByLabelText('Enable mcp_stash_get_tags'),
+    )
+
+    const post = stub.calls.find(
+      ([, method]) => method === 'POST',
+    )
+
+    expect(post).toBeDefined()
+    expect(post?.[0]).toContain(
+      `/tools/${'mcp_stash_get_tags'}`,
+    )
+    expect(post?.[2]).toContain('"enabled":false')
   })
 })

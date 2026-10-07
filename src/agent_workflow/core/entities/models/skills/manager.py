@@ -37,6 +37,11 @@ class SkillManager:
 
         self._active_skills: set[str] = set()
         self._loaded_skills: set[str] = set()
+        # Skills the reader pinned from the UI. Tracked apart from
+        # `_active_skills` because the agent can activate a skill on
+        # its own, and clearing the preload must not silently drop an
+        # activation it made, nor the other way round.
+        self._preloaded_skills: set[str] = set()
         self._used_skills: set[str] = set()
 
         self._directory_marker = (
@@ -54,6 +59,45 @@ class SkillManager:
     @property
     def loaded_skills(self) -> tuple[str, ...]:
         return tuple(sorted(self._loaded_skills))
+
+    def preloaded_skills(self) -> tuple[str, ...]:
+        return tuple(sorted(self._preloaded_skills))
+
+    def is_preloaded(self, name: str) -> bool:
+        return name in self._preloaded_skills
+
+    async def preload(
+        self,
+        names: list[str],
+        run_id: str = "",
+        parent_run_id: str | None = None,
+    ) -> tuple[str, ...]:
+        """Activate a set of skills and remember the choice.
+
+        An empty list clears the preload without deactivating anything
+        the agent activated by itself, since the two are tracked
+        separately.
+        """
+
+        wanted = [name.strip() for name in names if name.strip()]
+        removed = self._preloaded_skills - set(wanted)
+
+        for name in removed:
+            # Only deactivate if the preload was the reason it was
+            # active; a skill the agent loaded stays put.
+            self._preloaded_skills.discard(name)
+
+            if name in self._active_skills and name not in self._used_skills:
+                self._active_skills.discard(name)
+
+        # Each activation emits its own event; the set operation itself
+        # does not, because an event naming no skill would show up in
+        # the transcript as a skill that does not exist.
+        for name in wanted:
+            await self.activate(name, run_id, parent_run_id)
+            self._preloaded_skills.add(name)
+
+        return self.preloaded_skills()
 
     @property
     def used_skills(self) -> tuple[str, ...]:

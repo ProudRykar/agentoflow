@@ -12,6 +12,11 @@ class SchemaGenerator:
     Structured inputs are dataclasses. Plugins are also allowed
     to declare opaque inputs (``dict``, primitives), which are
     described by a permissive schema rather than rejected.
+
+    Nested dataclasses are described in place. A tool that takes a list
+    of objects needs the shape of those objects spelled out, and the
+    alternative -- flattening them away -- leaves a model guessing what
+    belongs in each entry.
     """
 
     def generate(
@@ -23,12 +28,45 @@ class SchemaGenerator:
             schema = self._opaque_schema(input_type)
 
             if schema is None:
+                # getattr, not __name__: an unparameterised builtin like
+                # ``object`` has no __name__, so the error path raised
+                # AttributeError while trying to describe a bad input
+                # type, which says nothing about what was wrong.
                 raise TypeError(
-                    f"{input_type.__name__} must be a dataclass, "
-                    "dict, or a primitive type"
+                    f"{getattr(input_type, '__name__', input_type)} "
+                    "must be a dataclass, dict, or a primitive type"
                 )
 
             return schema
+
+        return self._object_schema(input_type, set())
+
+    def _object_schema(
+        self,
+        input_type: Any,
+        seen: set[Any],
+    ) -> dict[str, object]:
+        """Describe a dataclass as a JSON object.
+
+        ``seen`` is the chain of dataclasses currently being described
+        rather than everything described so far. A type that appears
+        twice on one path is self-referential, and recursing into it
+        would never terminate; one that merely repeats across sibling
+        fields is ordinary and is described in full each time.
+        """
+
+        if input_type in seen:
+            # A cycle cannot be spelled out in JSON Schema without
+            # inventing a $ref convention nothing else here understands.
+            # A free-form object is the honest description, and it
+            # keeps a recursive input type from taking down every tool
+            # page it is registered on.
+            return {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": True,
+            }
 
         hints = get_type_hints(input_type)
 
@@ -41,11 +79,14 @@ class SchemaGenerator:
         properties = schema["properties"]
         required = schema["required"]
 
+        nested = {*seen, input_type}
+
         for field in fields(input_type):
             field_type = hints[field.name]
 
             properties[field.name] = self._type_to_schema(
-                field_type
+                field_type,
+                nested,
             )
 
             if (
@@ -103,7 +144,9 @@ class SchemaGenerator:
             return {
                 "type": "array",
                 "items": (
-                    self._type_to_schema(args[0])
+                    # No nesting chain here: this is a top-level opaque
+                    # type, so nothing is being described above it.
+                    self._type_to_schema(args[0], set())
                     if args
                     else {"type": "object"}
                 ),
@@ -132,6 +175,7 @@ class SchemaGenerator:
     def _type_to_schema(
         self,
         field_type: type,
+        seen: set[Any] | None = None,
     ) -> dict[str, object]:
         # An unconstrained value. MCP tools reach this whenever the
         # remote schema declares no recognisable type, and Any is
@@ -162,7 +206,7 @@ class SchemaGenerator:
                 if inner is Any or inner is object:
                     return {}
 
-                schema = self._type_to_schema(inner)
+                schema = self._type_to_schema(inner, seen)
                 schema["nullable"] = True
                 return schema
 
@@ -172,7 +216,7 @@ class SchemaGenerator:
             if len(args) == 2 and args[1] is Ellipsis:
                 return {
                     "type": "array",
-                    "items": self._type_to_schema(args[0]),
+                    "items": self._type_to_schema(args[0], seen),
                 }
 
         if origin is list:
@@ -181,7 +225,7 @@ class SchemaGenerator:
             return {
                 "type": "array",
                 "items": (
-                    self._type_to_schema(args[0])
+                    self._type_to_schema(args[0], seen)
                     if args
                     else {"type": "object"}
                 ),
@@ -193,7 +237,7 @@ class SchemaGenerator:
             return {
                 "type": "array",
                 "items": (
-                    self._type_to_schema(args[0])
+                    self._type_to_schema(args[0], seen)
                     if args
                     else {"type": "object"}
                 ),
@@ -207,7 +251,7 @@ class SchemaGenerator:
                 return {
                     "type": "object",
                     "additionalProperties": self._type_to_schema(
-                        args[1]
+                        args[1], seen
                     ),
                 }
 
@@ -215,6 +259,16 @@ class SchemaGenerator:
                 "type": "object",
                 "additionalProperties": True,
             }
+
+        # A dataclass in a field position: describe it in place rather
+        # than rejecting it. Raising here is what made a tool with a
+        # list of objects unlistable, and the failure surfaced as a 500
+        # on the whole tools page rather than on that one entry.
+        if is_dataclass(field_type):
+            return self._object_schema(
+                field_type,
+                seen or set(),
+            )
 
         if field_type is str:
             return {"type": "string"}

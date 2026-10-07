@@ -118,7 +118,12 @@ def create_skills_load_tool() -> Tool[SkillsLoadInput, ToolResult]:
         input_type=SkillsLoadInput,
         handler=handler,
         policy=ToolPolicy(
-            permissions=frozenset([SKILLS_WRITE]),
+            # Reading a skill is a read. Activation changes the
+            # agent's own state for this run, not the library on
+            # disk, so this must not require skills.write: an
+            # operator granting read-only access to skills would
+            # otherwise be unable to use them at all.
+            permissions=frozenset([SKILLS_READ]),
             timeout=30.0,
             max_output_size=5000,
         ),

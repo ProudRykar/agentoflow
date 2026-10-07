@@ -23,10 +23,18 @@ class ApprovalHook(AgentHook):
         handler: ApprovalHandler,
         shell_policy: ShellPolicy,
         registry: ToolRegistry | None = None,
+        *,
+        remember_approvals: bool = True,
     ) -> None:
         self._handler = handler
         self._shell_policy = shell_policy
         self._registry = registry
+        # A granted permission used to be recorded and then ignored,
+        # so every call asked again. Honouring it is what makes bulk
+        # work bearable: approve one tool once, and the rest of that
+        # session proceeds. Turning it off restores asking on every
+        # call, for an operator who wants each one.
+        self._remember_approvals = remember_approvals
 
     async def before_llm(
         self,
@@ -146,7 +154,19 @@ class ApprovalHook(AgentHook):
             return ungranted[0]
 
         if policy.requires_approval:
-            return f"tool:{tool_call.name}"
+            synthetic = f"tool:{tool_call.name}"
+
+            if (
+                self._remember_approvals
+                and synthetic
+                in context.approved_permissions
+            ):
+                # Already granted earlier in this session. Asking
+                # again would train the operator to click allow
+                # without reading, which is worse than asking once.
+                return None
+
+            return synthetic
 
         return None
 

@@ -23,15 +23,18 @@ from typing import Any
 
 from agent_workflow.core.application.events import DomainEvent, StoredEvent
 from agent_workflow.core.entities.models.agent_phase import AgentPhase
+from agent_workflow.core.entities.models.plan_step import PlanStepStatus
 from agent_workflow.core.entities.models.agent_trace import (
     AgentEvent,
     AgentFinished,
     AgentPhaseChanged,
+    PlanUpdated,
     AgentStarted,
     LLMContentChunk,
     LLMRequested,
     LLMResponded,
     LLMThinkingChunk,
+    RunFailed,
     ToolFinished,
     ToolStarted,
 )
@@ -43,10 +46,13 @@ from agent_workflow.core.entities.models.approval import (
 
 EVENTS_DATABASE = "session-events.db"
 
-# Streaming a response produces a lot of chunks. Keeping the last
-# few thousand events per session is far more transcript than anyone
-# scrolls, and it stops an old chat from growing without bound.
-DEFAULT_KEEP_EVENTS = 2_000
+# Streaming a response produces a lot of chunks, so a busy session
+# reaches tens of thousands of rows. The log is append-only and SQLite
+# reads it fine, so nothing is trimmed by default: dropping the head
+# silently destroyed the opening of any long conversation, including
+# the `agent.started` events the UI turns back into user messages.
+# Trimming remains available for a caller that genuinely wants a bound.
+DEFAULT_KEEP_EVENTS: int | None = None
 
 # A restored tool result re-enters the context on every later turn,
 # so the excerpt stays small even though the transcript keeps the
@@ -60,6 +66,7 @@ MAX_RESTORED_TOOL_CHARS = 2_000
 _REGISTRY: dict[str, type[Any]] = {
     "AgentStarted": AgentStarted,
     "AgentPhaseChanged": AgentPhaseChanged,
+    "PlanUpdated": PlanUpdated,
     "LLMRequested": LLMRequested,
     "LLMThinkingChunk": LLMThinkingChunk,
     "LLMContentChunk": LLMContentChunk,
@@ -69,10 +76,15 @@ _REGISTRY: dict[str, type[Any]] = {
     "AgentFinished": AgentFinished,
     "ApprovalRequested": ApprovalRequested,
     "ApprovalResolved": ApprovalResolved,
+    "RunFailed": RunFailed,
 }
 
 _ENUMS: dict[str, type[Enum]] = {
     "AgentPhase": AgentPhase,
+    # PlanUpdated carries step status and phase as plain strings, so a
+    # plan event survives the round trip through storage without the
+    # encoder needing to know these names.
+    "PlanStepStatus": PlanStepStatus,
 }
 
 
@@ -219,10 +231,10 @@ class EventStore:
         self,
         path: Path,
         *,
-        keep_events: int = DEFAULT_KEEP_EVENTS,
+        keep_events: int | None = DEFAULT_KEEP_EVENTS,
     ) -> None:
         self._path = path
-        self._keep = max(keep_events, 1)
+        self._keep = max(keep_events, 1) if keep_events else None
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._path)
@@ -263,19 +275,20 @@ class EventStore:
                 rows,
             )
 
-            connection.execute(
-                """
-                DELETE FROM session_events
-                WHERE session_id = ?
-                  AND seq < (
-                      SELECT seq FROM session_events
-                      WHERE session_id = ?
-                      ORDER BY seq DESC
-                      LIMIT 1 OFFSET ?
-                  )
-                """,
-                (session_id, session_id, self._keep - 1),
-            )
+            if self._keep is not None:
+                connection.execute(
+                    """
+                    DELETE FROM session_events
+                    WHERE session_id = ?
+                      AND seq < (
+                          SELECT seq FROM session_events
+                          WHERE session_id = ?
+                          ORDER BY seq DESC
+                          LIMIT 1 OFFSET ?
+                      )
+                    """,
+                    (session_id, session_id, self._keep - 1),
+                )
 
     def load(
         self,
@@ -303,6 +316,21 @@ class EventStore:
             stored.append(StoredEvent(seq=seq, event=event))
 
         return stored
+
+    def oldest_seq(self, session_id: str) -> int:
+        """The first sequence still on disk, 0 when the session is empty.
+
+        Reported to the client instead of a hardcoded 1, so a trimmed
+        log is visible as such rather than passing for a whole one.
+        """
+
+        row = self._connect().execute(
+            "SELECT COALESCE(MIN(seq), 0) FROM session_events"
+            " WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+
+        return int(row[0]) if row else 0
 
     def latest_seq(self, session_id: str) -> int:
         row = self._connect().execute(

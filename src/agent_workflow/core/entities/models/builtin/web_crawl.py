@@ -8,10 +8,14 @@ from urllib.parse import urljoin, urlsplit
 
 import httpx
 
+from agent_workflow.core.entities.models import web_failure as failure
 from agent_workflow.core.entities.models.research_contract import (
     ResearchPage,
     ResearchResult,
     canonicalize_url,
+)
+from agent_workflow.core.entities.models.web_policy import (
+    WebPolicy,
 )
 from agent_workflow.core.entities.models.tool import (
     Tool,
@@ -433,6 +437,13 @@ class WebFetcher:
     Atomic HTTP page fetcher.
 
     web_fetch and web_crawl both use this implementation.
+
+    Every hop is checked against ``WebPolicy``. Checking only the
+    entry URL is not enough: a public page can answer with a redirect
+    to 169.254.169.254 or to 127.0.0.1:9999, and following it would
+    turn a web tool into a way to read whatever the agent's own user
+    can reach. The policy is created here rather than injected so
+    that the check cannot be left out at a call site.
     """
 
     def __init__(
@@ -440,6 +451,7 @@ class WebFetcher:
         *,
         timeout: float = 30.0,
         max_redirects: int = 5,
+        policy: WebPolicy | None = None,
     ) -> None:
         if timeout <= 0:
             raise ValueError(
@@ -457,6 +469,8 @@ class WebFetcher:
             max_redirects
         )
 
+        self._policy = policy or WebPolicy()
+
     @property
     def timeout(self) -> float:
         return self._timeout
@@ -470,6 +484,10 @@ class WebFetcher:
     ) -> WebPage:
         current_url = (
             canonicalize_url(url)
+        )
+
+        await self._policy.validate_url(
+            current_url
         )
 
         if max_bytes <= 0:
@@ -518,8 +536,7 @@ class WebFetcher:
                     )
                 except httpx.HTTPError as exc:
                     raise WebFetchError(
-                        "HTTP request failed for "
-                        f"{current_url}: {exc}"
+                        failure.note_failure(exc, current_url)
                     ) from exc
 
                 if (
@@ -556,6 +573,13 @@ class WebFetcher:
                                 location,
                             )
                         )
+                    )
+
+                    # Re-checked on every hop: the redirect target is
+                    # attacker-controlled, so the entry URL being
+                    # public says nothing about where it leads.
+                    await self._policy.validate_url(
+                        redirected
                     )
 
                     if root_host is not None:

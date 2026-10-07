@@ -37,6 +37,8 @@ from agent_workflow.core.application.runtime import (
 from agent_workflow.core.application.tool_stats_store import (
     ToolStatsStore,
 )
+from agent_workflow.core.entities.models.agent_trace import RunFailed
+from agent_workflow.core.infrastructure.mcp.pool import MCPProcessPool
 from agent_workflow.core.infrastructure.paths import (
     AgentWorkflowPaths,
 )
@@ -98,6 +100,9 @@ class AgentSession:
     # Called with this session when working state should be written.
     state_persist: Any = None
     _state_persist_error: str = ""
+
+    # Skills the reader pinned from the UI, restored on re-entry.
+    preloaded_skill_names: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         self.approval.set_on_event(self._on_approval_event)
@@ -355,8 +360,6 @@ class AgentSession:
             task_contract,
         )
 
-        first_turn = not self._first_message_used
-
         self._first_message_used = True
 
         self._maybe_generate_title(prompt)
@@ -390,6 +393,31 @@ class AgentSession:
                 context=self.context,
                 on_event=self.emit,
                 task_contract=task_contract,
+            ),
+        )
+
+    async def start_regenerate(self, hint: str = "") -> None:
+        """Answer the last question again (``regenerate``).
+
+        Same task and same anchor as the discarded attempt, so the
+        retry is a second take at the same question rather than a new
+        one. Refused before launch when there is no assistant turn to
+        replace, which would otherwise delete the user's own message.
+        """
+
+        self._require_idle()
+
+        if not self.agent.context_manager.has_trailing_assistant():
+            raise ValueError(
+                "Nothing to regenerate: the last message is not an "
+                "assistant answer"
+            )
+
+        await self._launch(
+            lambda: self.agent.regenerate(
+                context=self.context,
+                on_event=self.emit,
+                hint=hint.strip(),
             ),
         )
 
@@ -554,6 +582,50 @@ class AgentSession:
 
         self.flush_events()
 
+    def persist_preloaded_skills(
+        self,
+        names: tuple[str, ...] | list[str],
+    ) -> None:
+        """Remember the skills the reader pinned for this session.
+
+        Without this a preload lasts only until the page is reloaded,
+        which defeats the point of pinning: the agent is supposed to stop
+        having to ask for the skill in the first place.
+        """
+
+        self.preloaded_skill_names = tuple(names)
+
+        # Written through the owner rather than a store of its own, so
+        # the preload lands in the same row as the rest of the working
+        # state instead of racing a second writer.
+        self.flush_working_state()
+
+    async def apply_preloaded_skills(
+        self,
+        names: tuple[str, ...] | list[str] = (),
+    ) -> tuple[str, ...]:
+        """Re-pin what was pinned before, after a restart."""
+
+        wanted = tuple(names) or self.preloaded_skill_names
+
+        if not wanted:
+            return ()
+
+        manager = self.runtime.agent.skill_manager
+
+        if manager is None:
+            return ()
+
+        try:
+            applied = await manager.preload(list(wanted))
+        except Exception:
+            # A skill file may have been deleted since it was pinned.
+            return ()
+
+        self.preloaded_skill_names = applied
+
+        return applied
+
         self.stats.flush()
 
     async def close(self) -> None:
@@ -593,6 +665,11 @@ class AgentSession:
             "created_at": self.created_at,
             "metadata": dict(self.metadata),
             "model": self.config.llm.model,
+            # The run's token allowance, so the UI can show progress
+            # toward it rather than only reporting after the fact.
+            "max_prompt_tokens": (
+                self.config.agent.max_prompt_tokens
+            ),
             "working_directory": str(
                 self.working_directory
             ),
@@ -639,19 +716,6 @@ class AgentSession:
         }
 
 
-@dataclass(slots=True, frozen=True)
-class RunFailed:
-    """Session-level failure, not an Agent event.
-
-    Agent errors surface as exceptions from ``run``; the web
-    layer needs them as a stream item so the browser can render
-    them like any other message.
-    """
-
-    session_id: str
-    error: str
-
-
 class SessionManager:
     """Registry of independent sessions.
 
@@ -674,6 +738,11 @@ class SessionManager:
         self._sessions: dict[str, AgentSession] = {}
         self._store = store
         self._stats_store = stats_store
+
+        # One pool for every session this manager owns. Without it
+        # each session starts its own MCP client, so a stdio server
+        # backed by a container costs one container per session.
+        self._mcp_pool = MCPProcessPool()
         self._event_store = (
             event_store if event_store is not None else None
         )
@@ -815,6 +884,8 @@ class SessionManager:
             approval_handler=approval,
             working_directory=working_directory,
             stats_store=self._stats_store,
+            mcp_pool=self._mcp_pool,
+            session_id=session_id,
         )
 
         session = AgentSession(
@@ -921,6 +992,18 @@ class SessionManager:
 
         self._restore_transcript(session)
 
+        # After the transcript, so the pinned skills are in place before
+        # anything can ask the agent a question.
+        stored: tuple[str, ...] = ()
+
+        if self._state_store is not None:
+            try:
+                stored = self._state_store.preloaded_skills(session_id)
+            except Exception:
+                stored = ()
+
+        await session.apply_preloaded_skills(stored)
+
         return session
 
     def _restore_transcript(
@@ -1017,6 +1100,7 @@ class SessionManager:
         try:
             self._state_store.save(
                 session.session_id,
+                preloaded_skills=session.preloaded_skill_names,
                 **parts,
             )
         except Exception as exc:
@@ -1126,3 +1210,6 @@ class SessionManager:
 
     def __len__(self) -> int:
         return len(self._sessions)
+
+
+__all__ = ["RunFailed", "SessionManager"]

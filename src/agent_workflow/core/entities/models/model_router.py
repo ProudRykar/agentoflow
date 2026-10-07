@@ -114,10 +114,59 @@ class DefaultModelRouter:
 
         if candidate is None:
             raise ModelRoutingError(
-                "No suitable model found for task"
+                self._no_model_message(task)
             )
 
         return candidate.model.name
+
+    def _no_model_message(
+        self,
+        task: SubagentTask,
+    ) -> str:
+        """Explain an empty routing result.
+
+        "No suitable model found" sent people looking at the router
+        when the cause was a catalog that never declared any
+        capabilities. Say which catalog, how many models it holds,
+        and what is undeclared.
+        """
+
+        if not self._catalog.models:
+            return (
+                "No model in the catalog can run a subagent: "
+                "the catalog is empty."
+            )
+
+        undeclared = sum(
+            1
+            for model in self._catalog.models
+            if not model.capabilities
+        )
+
+        detail = ""
+
+        if undeclared == len(self._catalog.models):
+            detail = (
+                f" None of the {undeclared} models declares a "
+                "[models.capabilities] table, so none can be "
+                "matched to the "
+                f"'{task.profile.capability}' capability."
+            )
+        elif undeclared:
+            detail = (
+                f" {undeclared} of {len(self._catalog.models)} "
+                "models declare no [models.capabilities] and were "
+                "not matched on capability."
+            )
+
+        return (
+            "No suitable model found for task "
+            f"(capability '{task.profile.capability}', "
+            f"power '{task.profile.power}', "
+            f"complexity '{task.profile.complexity}'). "
+            f"The catalog holds {len(self._catalog.models)} "
+            f"model(s).{detail}"
+        )
 
     def rank(
         self,
@@ -169,15 +218,25 @@ class DefaultModelRouter:
 
         profile = task.profile
 
-        capability_score = model.capabilities.get(
-            profile.capability,
-            0,
-        )
+        # Absent capability metadata is not a disqualification. A
+        # catalog entry that declares no capabilities is simply
+        # unranked on this axis, and the remaining signals decide.
+        # Treating it as "cannot do this" made every subagent call
+        # fail with "No suitable model found" for a catalog that
+        # never claimed to be incomplete.
+        #
+        # Declared capabilities are still respected: a model that
+        # says what it is for, and not this, is passed over.
+        if model.capabilities:
+            capability_score = model.capabilities.get(
+                profile.capability,
+                0,
+            )
 
-        if capability_score <= 0:
-            return 0.0
+            if capability_score <= 0:
+                return 0.0
 
-        score += capability_score * 10
+            score += capability_score * 10
 
         score += self._complexity_score(
             model,

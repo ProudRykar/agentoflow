@@ -1195,3 +1195,82 @@ async def test_handler_unsubscribes_after_disconnect() -> None:
     )
 
     assert session.events.subscriber_count == baseline
+
+
+# ======================================================================
+# Reloading a long session
+# ======================================================================
+
+
+def test_a_reload_replays_past_the_in_memory_buffer(
+    stubbed: TestClient,
+    publish,
+) -> None:
+    """The whole point: a reload must not truncate the transcript.
+
+    The replay buffer is bounded, so a long session pushes its oldest
+    events out. A page reload reconnects with ``since=-1``, which used
+    to hand back only what the buffer still held -- the reader found
+    the top of the conversation gone, with no way to scroll to it.
+    """
+
+    session_id = _session(stubbed)
+    session = _get(stubbed, session_id)
+
+    # Shrink the existing bus rather than replacing it: the durable
+    # store is fed by a subscription made when the session was built,
+    # so a fresh bus would never persist anything.
+    session.events.history_limit = 4
+
+    for index in range(20):
+        publish(session, AgentStarted(prompt=f"p{index}"))
+
+    # Durable writes are batched and flushed at the end of a run, as
+    # they are in production.
+    session.flush_events()
+
+    # The store kept all of them while the buffer kept four.
+    assert session.event_store.count(session_id) == 20
+
+    with stubbed.websocket_connect(
+        f"/ws/sessions/{session_id}?since=-1"
+    ) as websocket:
+        replayed = []
+
+        while True:
+            frame = _read(websocket)
+
+            if frame["type"] == "session.snapshot":
+                break
+
+            replayed.append(frame["seq"])
+
+    assert len(replayed) == 20
+    assert replayed == sorted(replayed)
+    assert replayed[0] == 1
+
+
+def test_a_recent_cursor_does_not_reach_for_storage(
+    stubbed: TestClient,
+    publish,
+) -> None:
+    """Backfill is for a real gap, not for every reconnect."""
+
+    session_id = _session(stubbed)
+    session = _get(stubbed, session_id)
+
+    session.events.history_limit = 10
+
+    for index in range(6):
+        publish(session, AgentStarted(prompt=f"p{index}"))
+
+    with stubbed.websocket_connect(
+        f"/ws/sessions/{session_id}?since=4"
+    ) as websocket:
+        first = _read(websocket)
+        second = _read(websocket)
+        greeting = _read(websocket)
+
+    assert first["seq"] == 5
+    assert second["seq"] == 6
+    assert greeting["replayed"] == 2

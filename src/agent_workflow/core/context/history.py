@@ -19,6 +19,8 @@ class HistoryKind(StrEnum):
     PHASE_CHANGE = "phase_change"
     EVIDENCE_REF = "evidence_ref"
     CHECKPOINT = "checkpoint"
+    # A handover note standing in for a window that was dropped.
+    COMPACTION = "compaction"
 
 
 @dataclass(slots=True, frozen=True)

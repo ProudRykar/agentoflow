@@ -366,7 +366,10 @@ class SkillsService:
         path: Path,
     ) -> SkillDocument:
         try:
-            raw = path.read_text(encoding="utf-8")
+            # Probed, not parsed: parse_skill_file re-reads. This pass
+            # exists only to turn an OS error into a SkillError that
+            # names the file.
+            path.read_text(encoding="utf-8")
         except FileNotFoundError as exc:
             raise SkillError(
                 f"Skill file not found: {path.name}"

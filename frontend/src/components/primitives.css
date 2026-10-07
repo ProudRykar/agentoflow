@@ -1,0 +1,359 @@
+/**
+ * Shared primitives styles.
+ *
+ * Owned here rather than borrowed from a feature stylesheet, so a
+ * feature renders correctly on its own.
+ */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+
+.field-label {
+  color: var(--text-dim);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.field-control,
+.field input,
+.field select,
+.field textarea {
+  padding: 7px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-raised);
+  color: var(--text);
+  font: inherit;
+}
+
+.field input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  accent-color: var(--accent);
+}
+
+.field input:focus,
+.field select:focus,
+.field textarea:focus,
+.field-control:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.field-hint {
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.field-warning {
+  color: var(--warn);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.field.has-warning .field-control,
+.field.has-warning input,
+.field.has-warning select,
+.field.has-warning textarea {
+  border-color: var(--warn);
+}
+
+.field-textarea {
+  min-height: 84px;
+  resize: vertical;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.fieldset {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.fieldset legend {
+  padding: 0 6px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.field-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+/* Status chip tones. One vocabulary for every status on screen. */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.chip-neutral {
+  color: var(--text-dim);
+}
+
+.chip-progress {
+  color: var(--info);
+  border-color: color-mix(in srgb, var(--info) 45%, transparent);
+}
+
+.chip-ok {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.chip-warn {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+}
+
+.chip-bad {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+}
+
+/* Budget meter for the context window. */
+.budget {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.budget-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.budget-value {
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.budget-track {
+  height: 5px;
+  border-radius: 3px;
+  background: var(--bg-inset);
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+
+.budget-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 160ms linear;
+}
+
+.budget.is-warn .budget-fill {
+  background: var(--warn);
+}
+
+.budget.is-over .budget-fill {
+  background: var(--danger);
+}
+
+.budget-note {
+  font-size: 10px;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+
+.budget.is-warn .budget-note {
+  color: var(--warn);
+}
+
+.budget.is-over .budget-note {
+  color: var(--danger);
+}
+/* Execution plan: what the agent intends to do, and how far it is. */
+.plan-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.plan-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: lowercase;
+}
+
+.plan-count {
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.plan-objective {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text);
+}
+
+.plan-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.plan-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 160ms linear;
+}
+
+.plan-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.plan-step {
+  display: grid;
+  grid-template-columns: 14px 1fr;
+  gap: 6px;
+  align-items: start;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.plan-mark {
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.plan-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.plan-desc {
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+.plan-step.is-pending .plan-desc {
+  color: var(--text-dim);
+}
+
+.plan-step.is-active .plan-mark,
+.plan-step.is-active .plan-desc {
+  color: var(--accent);
+}
+
+.plan-step.is-completed .plan-mark {
+  color: var(--ok, var(--accent));
+}
+
+.plan-step.is-completed .plan-desc {
+  color: var(--text-dim);
+  text-decoration: line-through;
+  text-decoration-color: var(--border);
+}
+
+.plan-step.is-failed .plan-mark,
+.plan-step.is-failed .plan-detail {
+  color: var(--danger);
+}
+
+.plan-step.is-failed .plan-desc {
+  color: var(--text);
+}
+
+.plan-step.is-skipped .plan-desc {
+  opacity: 0.55;
+}
+
+.plan-detail,
+.plan-hint {
+  font-size: 10px;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+.plan-hint {
+  opacity: 0.8;
+}
+
+.plan-foot {
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+/* Each context-meter note on its own line. */
+.budget-note-line {
+  display: block;
+}
+
+.budget-note-line + .budget-note-line {
+  margin-top: 1px;
+}
+
+.run-usage {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.run-usage-label {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.run-usage.is-warn {
+  border-color: #7a6a34;
+}
+
+.run-usage.is-over {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.run-usage-note {
+  opacity: 0.75;
+}

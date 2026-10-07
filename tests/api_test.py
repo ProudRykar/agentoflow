@@ -179,10 +179,15 @@ def test_run_twice_conflicts_while_running(
         approval_handler,
         working_directory=None,
         stats_store=None,
+        mcp_pool=None,
+        session_id="",
     ):
         runtime = await base(
             approval_handler,
             working_directory,
+            stats_store,
+            mcp_pool,
+            session_id,
         )
 
         class GatedLLM(type(runtime.agent._llm)):  # type: ignore[attr-defined]
@@ -437,6 +442,33 @@ def test_skills_unknown_session(stubbed: TestClient) -> None:
     assert stubbed.get("/api/skills/missing").status_code == 404
 
 
+def test_preload_reports_a_session_without_skill_support(
+    stubbed: TestClient,
+) -> None:
+    """409 rather than a silent no-op.
+
+    A preload that quietly did nothing would show in the UI as done,
+    and the agent would still be missing the skill. The stub runtime
+    here has no skill manager, which is exactly the case.
+    """
+
+    session_id = stubbed.post("/api/sessions").json()["session_id"]
+
+    response = stubbed.post(
+        f"/api/skills/{session_id}/preload",
+        json={"skills": []},
+    )
+
+    assert response.status_code == 409
+
+
+def test_preload_unknown_session(stubbed: TestClient) -> None:
+    assert stubbed.post(
+        "/api/skills/missing/preload",
+        json={"skills": []},
+    ).status_code == 404
+
+
 def test_plugins_endpoint(stubbed: TestClient) -> None:
     session_id = stubbed.post(
         "/api/sessions"
@@ -687,10 +719,15 @@ def test_message_conflicts_while_running(
         approval_handler,
         working_directory=None,
         stats_store=None,
+        mcp_pool=None,
+        session_id="",
     ):
         runtime = await base(
             approval_handler,
             working_directory,
+            stats_store,
+            mcp_pool,
+            session_id,
         )
 
         class GatedLLM(type(runtime.agent._llm)):  # type: ignore[attr-defined]
@@ -1297,3 +1334,60 @@ def test_mcp_connect_failure_reports_state(
     detail = stubbed.get(f"/api/mcp/{session_id}").json()
 
     assert detail["servers"][0]["error"]
+
+
+def test_regenerate_is_available_after_an_answer(
+    stubbed: TestClient,
+) -> None:
+    session_id = stubbed.post(
+        "/api/sessions"
+    ).json()["session_id"]
+
+    stubbed.post(
+        f"/api/sessions/{session_id}/run",
+        json={"prompt": "one"},
+    )
+
+    response = stubbed.post(
+        f"/api/sessions/{session_id}/regenerate",
+        json={"hint": ""},
+    )
+
+    assert response.status_code == 200
+
+
+def test_regenerate_accepts_a_hint(
+    stubbed: TestClient,
+) -> None:
+    session_id = stubbed.post(
+        "/api/sessions"
+    ).json()["session_id"]
+
+    stubbed.post(
+        f"/api/sessions/{session_id}/run",
+        json={"prompt": "one"},
+    )
+
+    response = stubbed.post(
+        f"/api/sessions/{session_id}/regenerate",
+        json={"hint": "be shorter"},
+    )
+
+    assert response.status_code == 200
+
+
+def test_regenerate_without_an_answer_is_a_conflict(
+    stubbed: TestClient,
+) -> None:
+    """The caller asked wrongly; that is not a server fault."""
+
+    session_id = stubbed.post(
+        "/api/sessions"
+    ).json()["session_id"]
+
+    response = stubbed.post(
+        f"/api/sessions/{session_id}/regenerate",
+        json={"hint": ""},
+    )
+
+    assert response.status_code == 409

@@ -174,9 +174,17 @@ def create_subagent_tool(
             timeout_seconds=input_data.timeout_seconds,
         )
 
+        # A user turn carries no run id, so the delegation prompt can
+        # only be recognised as a subagent's by this field being set.
+        # ToolContext.run_id defaults to "", and an empty parent makes
+        # the prompt render as if the user had typed it. "main" is the
+        # same fallback the transcript uses for a missing run id, so
+        # the grouping stays coherent either way.
+        parent_run_id = context.run_id or "main"
+
         result = await manager.run(
             task,
-            parent_run_id=context.run_id,
+            parent_run_id=parent_run_id,
             parent_context=context,
             on_event=context.event_callback,
         )

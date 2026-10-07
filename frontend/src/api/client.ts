@@ -7,6 +7,7 @@ import type {
   SkillDetail,
   SkillInfo,
   SystemInfo,
+  ToolToggleResult,
   ToolsResponse,
 } from './types'
 
@@ -122,6 +123,23 @@ export function continueRun(
 }
 
 /**
+ * Ask for the last answer again.
+ *
+ * The hint is optional: a bare retry is a legitimate request, and
+ * making the caller invent wording would only push them into resending
+ * the same question as a new message.
+ */
+export function regenerateRun(
+  sessionId: string,
+  hint = '',
+): Promise<{ session_id: string; status: string; state: string }> {
+  return request(`/sessions/${sessionId}/regenerate`, {
+    method: 'POST',
+    body: JSON.stringify({ hint }),
+  })
+}
+
+/**
  * Submit a user turn.
  *
  * `mode: 'auto'` lets the session decide between opening a new
@@ -192,12 +210,48 @@ export function listSkills(sessionId: string): Promise<SkillInfo[]> {
   return request(`/skills/${sessionId}`)
 }
 
+/**
+ * Pin skills into the agent's context.
+ *
+ * An agent left to decide for itself tends not to load the skill that
+ * would have told it what to do, so the reader can decide here.
+ */
+export function preloadSkills(
+  sessionId: string,
+  skills: string[],
+): Promise<{ preloaded: string[]; active: string[] }> {
+  return request(`/skills/${sessionId}/preload`, {
+    method: 'POST',
+    body: JSON.stringify({ skills }),
+  })
+}
+
 export function listPlugins(sessionId: string): Promise<PluginInfo[]> {
   return request(`/plugins/${sessionId}`)
 }
 
 export function listTools(sessionId: string): Promise<ToolsResponse> {
   return request(`/tools/${sessionId}`)
+}
+
+/**
+ * Switch one tool off or on.
+ *
+ * The tool name is a path segment, so it is encoded: MCP tool names
+ * contain dots and a stray slash would address a different route.
+ */
+export function setToolEnabled(
+  sessionId: string,
+  name: string,
+  enabled: boolean,
+): Promise<ToolToggleResult> {
+  return request(
+    `/tools/${sessionId}/tools/${encodeURIComponent(name)}`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ enabled }),
+    },
+  )
 }
 
 export function listMcp(sessionId: string): Promise<MCPResponse> {

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { readSettings, writeSettings } from '../../api/client'
+import { Field as SharedField } from '../../components/Field'
 
 const CONFIG_FILE = 'config.toml'
 
@@ -161,16 +162,16 @@ export function ConfigEditor({
 interface FieldProps {
   label: string
   hint?: string
+  /** Shown instead of the hint when the value is out of range. */
+  warning?: string
   children: React.ReactNode
 }
 
-function Field({ label, hint, children }: FieldProps) {
+function Field({ label, hint, warning, children }: FieldProps) {
   return (
-    <label className="field">
-      <span className="field-label">{label}</span>
+    <SharedField label={label} hint={hint} warning={warning}>
       {children}
-      {hint && <span className="field-hint">{hint}</span>}
-    </label>
+    </SharedField>
   )
 }
 
@@ -305,7 +306,7 @@ function ConfigFields({
 
         <Field
           label="Max messages"
-          hint="Chat message objects, not turns; leave empty for no limit"
+          hint="Counts chat message objects, not turns: one assistant reply plus its tool results counts as several. Leave empty for no limit; the token budget still applies."
         >
           <input
             type="number"
@@ -330,7 +331,12 @@ function ConfigFields({
 
         <Field
           label="Token estimation divisor"
-          hint="Characters per token"
+          hint="Characters per token. 4 fits prose, 2-3 fits code and JSON; lower means the agent trims earlier."
+          warning={
+            Number(context.token_estimation_divisor ?? 4) > 4
+              ? 'Above 4 undercounts code and JSON, so the budget will overrun.'
+              : undefined
+          }
         >
           <input
             type="number"

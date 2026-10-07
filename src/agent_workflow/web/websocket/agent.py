@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import asyncio
 import json
 from contextlib import suppress
@@ -12,6 +14,8 @@ from agent_workflow.core.application.session import SessionManager
 from agent_workflow.web.auth import AuthSettings, guard_websocket
 from agent_workflow.web.serialization import dumps
 
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -89,7 +93,15 @@ async def agent_socket(
     # Replay first, then attach. Subscribing after the replay
     # closes the gap where an event could be published between
     # reading history and starting the live subscription.
-    backlog = bus.replay_since(since)
+    # The in-memory replay buffer is bounded. When the client's
+    # cursor points before its oldest retained event -- which is every
+    # page reload, since the cursor starts at -1 -- the evicted prefix
+    # is read from durable storage instead. Without this a long
+    # session came back truncated at the top with no way to reach it.
+    backlog = bus.replay_since(
+        since,
+        backfill=_durable_backfill(session),
+    )
 
     pending = asyncio.Queue()
     key = bus.subscribe(
@@ -105,7 +117,10 @@ async def agent_socket(
                 stored.event,
             )
 
-        oldest = bus.oldest_retained_seq()
+        # Reported as the durable floor, not the buffer's, so the
+        # client knows it now has everything rather than believing the
+        # buffer is the whole story.
+        oldest = _oldest_available(session, bus)
 
         await _send_raw(
             websocket,
@@ -277,3 +292,57 @@ async def _read_client(websocket: WebSocket) -> None:
                 await websocket.send_text("pong")
             except Exception:
                 return
+
+
+def _durable_backfill(session):
+    """Read the events the bus has evicted from its own buffer.
+
+    Returns None when the session has no durable store, so the bus
+    falls back to replaying what it still holds rather than failing.
+    """
+
+    store = getattr(session, "event_store", None)
+
+    if store is None:
+        return None
+
+    session_id = session.session_id
+
+    def load(after_seq: int):
+        try:
+            return store.load(session_id, after_seq=after_seq)
+        except Exception:
+            logger.warning(
+                "Could not backfill events for session %s",
+                session_id,
+                exc_info=True,
+            )
+            return []
+
+    return load
+
+
+def _oldest_available(session, bus) -> int:
+    """The first sequence a reconnecting client can still receive."""
+
+    store = getattr(session, "event_store", None)
+
+    if store is None:
+        return bus.oldest_retained_seq()
+
+    try:
+        count = store.count(session.session_id)
+    except Exception:
+        return bus.oldest_retained_seq()
+
+    if count <= 0:
+        return bus.oldest_retained_seq()
+
+    # The real first sequence on disk. Reporting a hardcoded 1 claimed
+    # a complete history to a log whose head had been trimmed.
+    try:
+        floor = store.oldest_seq(session.session_id)
+    except AttributeError:
+        return 1
+
+    return floor or 1

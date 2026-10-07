@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, make_dataclass
+from dataclasses import make_dataclass
 from typing import Any
 
 
@@ -126,7 +126,7 @@ def build_input_dataclass(
         else set()
     )
 
-    from dataclasses import MISSING, field as dataclass_field
+    from dataclasses import field as dataclass_field
 
     taken: set[str] = set()
     annotations: dict[str, Any] = {}
@@ -179,6 +179,37 @@ def _class_name(tool_name: str) -> str:
         part[:1].upper() + part[1:]
         for part in parts
     ) + "Input"
+
+
+def remote_field_map(
+    schema: dict[str, Any] | None,
+) -> dict[str, str]:
+    """Map sanitised dataclass field names back to schema names.
+
+    Keyed by name rather than position. Field order cannot be used
+    for this because only the fields the model actually supplied
+    survive decoding, so a positional mapping silently shifts every
+    value into the wrong parameter as soon as one optional argument
+    is omitted.
+    """
+
+    if not isinstance(schema, dict):
+        return {}
+
+    properties = schema.get("properties")
+
+    if not isinstance(properties, dict):
+        return {}
+
+    mapping: dict[str, str] = {}
+    taken: set[str] = set()
+
+    for raw_name in properties:
+        mapping[
+            sanitize_field_name(raw_name, taken)
+        ] = str(raw_name)
+
+    return mapping
 
 
 def property_names(

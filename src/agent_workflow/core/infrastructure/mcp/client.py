@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 from collections import deque
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -57,7 +58,12 @@ class MCPClient:
         self._config = config
         self._process: asyncio.subprocess.Process | None = None
         self._next_id = 0
-        self._lock = asyncio.Lock()
+        # Serialises writes only. Reads are demultiplexed by a single
+        # background task, so several calls can be in flight at once
+        # without their responses being read by the wrong waiter.
+        self._write_lock = asyncio.Lock()
+        self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
+        self._reader_task: asyncio.Task[None] | None = None
         self._server_info: ServerInfo | None = None
         self._stderr_lines: deque[str] = deque(maxlen=STDERR_BUFFER_LINES)
         self._stderr_task: asyncio.Task[None] | None = None
@@ -124,6 +130,10 @@ class MCPClient:
             self._drain_stderr()
         )
 
+        self._reader_task = asyncio.create_task(
+            self._read_loop(self._process)
+        )
+
         try:
             await self._initialize()
         except MCPError:
@@ -137,11 +147,21 @@ class MCPClient:
         self._process = None
         self._server_info = None
 
-        task = self._stderr_task
-        self._stderr_task = None
+        # Release anyone still waiting before the pipe is torn down,
+        # so a shutdown shows them a closed connection immediately
+        # rather than after their own timeout.
+        self._fail_pending(
+            MCPTransportError(
+                f"MCP server '{self._config.name}' was closed"
+            )
+        )
 
-        if task is not None and not task.done():
-            task.cancel()
+        for attribute in ("_reader_task", "_stderr_task"):
+            task = getattr(self, attribute)
+            setattr(self, attribute, None)
+
+            if task is not None and not task.done():
+                task.cancel()
 
         if process is None:
             return
@@ -266,6 +286,45 @@ class MCPClient:
             timeout=self._config.request_timeout,
         )
 
+    async def call_tools_concurrently(
+        self,
+        calls: Sequence[tuple[str, dict[str, Any]]],
+        *,
+        limit: int = 4,
+    ) -> list[Any]:
+        """Run several tool calls at once, keeping every outcome.
+
+        A bulk edit is N calls that each take a round trip, and issued
+        one per assistant turn they also cost N model turns and N
+        approvals. Overlapping them turns the wall clock into the
+        slowest call instead of the sum of all of them.
+
+        Failures are returned, not raised: one rejected item in a batch
+        of fifty is a normal outcome and must not discard the other
+        forty-nine, which are already done on the far side and cannot
+        be un-done by an exception here.
+        """
+
+        if limit < 1:
+            raise ValueError("limit must be >= 1")
+
+        if not calls:
+            return []
+
+        semaphore = asyncio.Semaphore(min(limit, len(calls)))
+
+        async def one(
+            tool_name: str,
+            arguments: dict[str, Any],
+        ):
+            async with semaphore:
+                return await self.call_tool(tool_name, arguments)
+
+        return await asyncio.gather(
+            *(one(name, args) for name, args in calls),
+            return_exceptions=True,
+        )
+
     # ==================================================================
     # Transport
     # ==================================================================
@@ -276,14 +335,19 @@ class MCPClient:
         params: dict[str, Any],
         timeout: float,
     ) -> dict[str, Any]:
-        async with self._lock:
-            process = self._process
+        process = self._process
 
-            if process is None or process.stdin is None:
-                raise MCPTransportError(
-                    f"MCP server '{self._config.name}' is not running"
-                )
+        if process is None or process.stdin is None:
+            raise MCPTransportError(
+                f"MCP server '{self._config.name}' is not running"
+            )
 
+        # The id is handed out and the line written under one lock so
+        # that the order of messages on the pipe always matches the
+        # order of their ids. Without that, two concurrent writes can
+        # interleave and a response can be attributed to the wrong
+        # request.
+        async with self._write_lock:
             self._next_id += 1
             request_id = self._next_id
 
@@ -293,93 +357,145 @@ class MCPClient:
                 id=request_id,
             )
 
+            waiter: asyncio.Future[dict[str, Any]] = (
+                asyncio.get_running_loop().create_future()
+            )
+
+            self._pending[request_id] = waiter
+
             try:
                 process.stdin.write(request.encode())
                 await process.stdin.drain()
             except (BrokenPipeError, ConnectionResetError) as exc:
+                self._pending.pop(request_id, None)
                 raise MCPTransportError(
                     f"MCP server '{self._config.name}' closed "
                     "the connection"
                 ) from exc
 
-            return await self._read_response(
-                process,
-                request_id,
-                method,
-                timeout,
-            )
-
-    async def _read_response(
-        self,
-        process: asyncio.subprocess.Process,
-        request_id: int,
-        method: str,
-        timeout: float,
-    ) -> dict[str, Any]:
-        assert process.stdout is not None
-
         try:
-            return await asyncio.wait_for(
-                self._await_response(
-                    process,
-                    request_id,
-                    method,
-                ),
-                timeout=timeout,
-            )
+            return await asyncio.wait_for(waiter, timeout=timeout)
         except asyncio.TimeoutError as exc:
+            # Dropped rather than left registered: a late reply to an
+            # abandoned request must not resolve whatever future
+            # happens to reuse this slot.
+            self._pending.pop(request_id, None)
             raise MCPTransportError(
                 f"MCP server '{self._config.name}' timed out on "
                 f"{method} after {timeout:g}s"
             ) from exc
 
-    async def _await_response(
+    async def _read_loop(
         self,
         process: asyncio.subprocess.Process,
-        request_id: int,
-        method: str,
-    ) -> dict[str, Any]:
-        assert process.stdout is not None
+    ) -> None:
+        """Route every response to the request that is waiting for it.
 
-        while True:
-            line = await process.stdout.readline()
+        One reader for the whole process. Each waiter used to read the
+        pipe itself and discard anything whose id did not match, which
+        meant a reply to a queued request was thrown away and the
+        server appeared to have answered the wrong thing. With N calls
+        in flight there is no ordering to fall back on, so the routing
+        has to be exact.
+        """
 
-            if not line:
-                raise MCPTransportError(
-                    f"MCP server '{self._config.name}' exited "
-                    f"while handling {method}"
+        stdout = process.stdout
+
+        if stdout is None:
+            self._fail_pending(
+                MCPTransportError(
+                    f"MCP server '{self._config.name}' has no stdout"
                 )
+            )
+            return
 
-            text = line.decode("utf-8", errors="replace").strip()
+        try:
+            while True:
+                line = await stdout.readline()
 
-            if not text:
-                continue
+                if not line:
+                    self._fail_pending(
+                        MCPTransportError(
+                            f"MCP server '{self._config.name}' exited"
+                        )
+                    )
+                    return
 
+                text = line.decode("utf-8", errors="replace").strip()
+
+                if not text:
+                    continue
+
+                self._dispatch(text)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._fail_pending(
+                MCPTransportError(
+                    f"MCP server '{self._config.name}' output failed: "
+                    f"{exc}"
+                )
+            )
+
+    def _dispatch(self, text: str) -> None:
+        try:
             payload = parse_response(text)
+        except Exception:
+            # Unparseable line: nothing is waiting on it by name, and
+            # failing every in-flight request over one bad line would
+            # turn a stray server log into an outage.
+            return
 
-            # Server-initiated notifications and requests carry no
-            # matching id; ignore them so they cannot desynchronise
-            # the request/response pairing.
-            if "method" in payload:
-                continue
+        # Server-initiated notifications and requests carry no id we
+        # issued; they are not answers to anything.
+        if "method" in payload:
+            return
 
-            if payload.get("id") != request_id:
-                continue
+        waiter = self._pending.get(payload.get("id"))
 
+        if waiter is None or waiter.done():
+            # A reply to a request that already timed out.
+            return
+
+        try:
             raise_for_error(payload)
+        except Exception as exc:
+            waiter.set_exception(exc)
+            return
 
-            result = payload.get("result")
+        result = payload.get("result")
 
-            if result is None:
-                return {}
+        if result is None:
+            waiter.set_result({})
+            return
 
-            if not isinstance(result, dict):
-                raise MCPProtocolError(
+        if not isinstance(result, dict):
+            waiter.set_exception(
+                MCPProtocolError(
                     f"Server '{self._config.name}' returned a "
-                    "non-object result",
+                    "non-object result"
                 )
+            )
+            return
 
-            return result
+        waiter.set_result(result)
+
+    def _fail_pending(
+        self,
+        error: Exception,
+    ) -> None:
+        """Release everyone waiting when the pipe dies.
+
+        Left unawaited, each waiter would sit until its own timeout,
+        turning one connection failure into N slow timeouts.
+        """
+
+        pending = list(self._pending.items())
+        self._pending.clear()
+
+        for _request_id, waiter in pending:
+            if not waiter.done():
+                waiter.set_exception(error)
 
     async def _notify(
         self,

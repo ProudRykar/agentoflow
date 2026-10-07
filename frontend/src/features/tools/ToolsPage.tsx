@@ -4,9 +4,11 @@ import {
   listMcp,
   listPlugins,
   listSkills,
+  preloadSkills,
   listTools,
   mcpReloadAll,
   mcpServerAction,
+  setToolEnabled,
   saveMcpServer,
   setMcpEnabled,
   type MCPServerAction,
@@ -21,7 +23,9 @@ import type {
   ToolsResponse,
 } from '../../api/types'
 import { SkillEditor } from '../skills/SkillEditor'
+import { Field } from '../../components/Field'
 import './ToolsPage.css'
+import '../../components/primitives.css'
 import '../skills/SkillEditor.css'
 
 type Tab = 'tools' | 'skills' | 'mcp'
@@ -44,6 +48,9 @@ export function ToolsPage({ sessionId, refreshKey }: ToolsPageProps) {
   const [error, setError] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   const [busyServer, setBusyServer] = useState<string | null>(null)
+  // One tool at a time: the switch re-lists the table, so two
+  // in flight would race the refresh.
+  const [busyTool, setBusyTool] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
 
   const load = useCallback(async () => {
@@ -100,6 +107,36 @@ export function ToolsPage({ sessionId, refreshKey }: ToolsPageProps) {
         )
       } finally {
         setBusyServer(null)
+      }
+    },
+    [load, sessionId],
+  )
+
+  const handleToggleTool = useCallback(
+    async (name: string, enabled: boolean) => {
+      if (!sessionId) {
+        return
+      }
+
+      setBusyTool(name)
+      setError(null)
+
+      try {
+        await setToolEnabled(sessionId, name, enabled)
+        await load()
+        setNotice(
+          enabled
+            ? `${name} enabled`
+            : `${name} disabled for this session and future ones`,
+        )
+      } catch (cause) {
+        setError(
+          cause instanceof Error
+            ? cause.message
+            : 'could not change the tool',
+        )
+      } finally {
+        setBusyTool(null)
       }
     },
     [load, sessionId],
@@ -285,11 +322,14 @@ export function ToolsPage({ sessionId, refreshKey }: ToolsPageProps) {
           data={tools}
           query={query}
           loading={loading}
+          busyTool={busyTool}
+          onToggle={handleToggleTool}
         />
       )}
 
       {tab === 'skills' && (
         <SkillsTab
+          sessionId={sessionId}
           skills={skills}
           plugins={plugins}
           query={query}
@@ -344,10 +384,14 @@ function ToolsTab({
   data,
   query,
   loading,
+  busyTool,
+  onToggle,
 }: {
   data: ToolsResponse | null
   query: string
   loading: boolean
+  busyTool: string | null
+  onToggle: (name: string, enabled: boolean) => void
 }) {
   if (!data) {
     return <p className="muted">{loading ? 'Loading…' : 'No data.'}</p>
@@ -364,8 +408,20 @@ function ToolsTab({
 
   const { summary } = data
 
+  // Tolerated absent: a backend older than this field omits it, and
+  // the page must still render rather than throw.
+  const hiddenCount = data.disabled?.length ?? 0
+
   return (
     <div className="tools-body">
+      {hiddenCount > 0 && (
+        <p className="muted tools-hint">
+          {hiddenCount} tool{hiddenCount === 1 ? '' : 's'} off.
+          A disabled tool cannot be called, but stays listed so it
+          can be switched back on.
+        </p>
+      )}
+
       <div className="stat-grid">
         <Stat label="Registered" value={summary.registered_tools} />
         <Stat label="Used" value={summary.tools_used} />
@@ -404,11 +460,17 @@ function ToolsTab({
               <th className="num">Errors</th>
               <th className="num">Avg</th>
               <th>Permissions</th>
+              <th className="num">On</th>
             </tr>
           </thead>
           <tbody>
             {filtered.map((tool) => (
-              <ToolRow key={tool.name} tool={tool} />
+              <ToolRow
+                key={tool.name}
+                tool={tool}
+                busy={busyTool === tool.name}
+                onToggle={onToggle}
+              />
             ))}
           </tbody>
         </table>
@@ -417,8 +479,19 @@ function ToolsTab({
   )
 }
 
-function ToolRow({ tool }: { tool: ToolInfo }) {
+function ToolRow({
+  tool,
+  busy,
+  onToggle,
+}: {
+  tool: ToolInfo
+  busy: boolean
+  onToggle: (name: string, enabled: boolean) => void
+}) {
   const [open, setOpen] = useState(false)
+
+  // Absent means enabled: the field postdates some responses.
+  const enabled = tool.enabled !== false
 
   const duration =
     tool.stats.average_duration === null
@@ -432,7 +505,7 @@ function ToolRow({ tool }: { tool: ToolInfo }) {
       <tr
         className={`tool-row${
           tool.stats.errors > 0 ? ' has-error' : ''
-        }`}
+        }${enabled ? '' : ' is-disabled'}`}
         onClick={() => setOpen(!open)}
       >
         <td>
@@ -452,6 +525,7 @@ function ToolRow({ tool }: { tool: ToolInfo }) {
             {tool.stats.running > 0 && (
               <span className="chip chip-running">running</span>
             )}
+            {!enabled && <span className="chip chip-off">off</span>}
           </div>
           <div className="tool-cell-desc">
             {tool.description || '—'}
@@ -510,11 +584,29 @@ function ToolRow({ tool }: { tool: ToolInfo }) {
             </div>
           )}
         </td>
+        <td className="num">
+          <label className="tool-switch">
+            <input
+              type="checkbox"
+              checked={enabled}
+              disabled={busy}
+              aria-label={`Enable ${tool.name}`}
+              // stopPropagation: the row toggles its detail panel.
+              onClick={(event) => event.stopPropagation()}
+              onChange={(event) =>
+                onToggle(tool.name, event.target.checked)
+              }
+            />
+            <span aria-hidden="true">
+              {busy ? '…' : enabled ? 'on' : 'off'}
+            </span>
+          </label>
+        </td>
       </tr>
 
       {open && (
         <tr className="tool-detail-row">
-          <td colSpan={6}>
+          <td colSpan={7}>
             <ToolDetail tool={tool} />
           </td>
         </tr>
@@ -621,6 +713,7 @@ function SkillsTab({
   skills,
   plugins,
   query,
+  sessionId,
   onError,
   onRefresh,
   onNotice,
@@ -628,10 +721,60 @@ function SkillsTab({
   skills: SkillInfo[]
   plugins: PluginInfo[]
   query: string
+  sessionId: string
   onError: (message: string | null) => void
   onRefresh: () => Promise<void>
   onNotice: (message: string) => void
 }) {
+  const [busySkill, setBusySkill] = useState<string | null>(null)
+
+  /**
+   * Pin or unpin a skill.
+   *
+   * The whole set goes rather than a single name, because the endpoint
+   * replaces the preload list: sending one name would read as "pin
+   * exactly this and drop the rest".
+   */
+  const togglePreload = useCallback(
+    async (name: string, wanted: boolean) => {
+      if (!sessionId) {
+        return
+      }
+
+      setBusySkill(name)
+      onError(null)
+
+      const pinned = skills.filter((skill) => skill.preloaded)
+
+      const next = wanted
+        ? [...pinned.map((skill) => skill.name), name]
+        : pinned
+            .filter((skill) => skill.name !== name)
+            .map((skill) => skill.name)
+
+      try {
+        await preloadSkills(sessionId, next)
+
+        onNotice(
+          wanted
+            ? `${name} will be loaded for every message in this session.`
+            : `${name} is no longer preloaded.`,
+        )
+
+        await onRefresh()
+      } catch (cause) {
+        onError(
+          cause instanceof Error
+            ? cause.message
+            : 'could not change the preloaded skills',
+        )
+      } finally {
+        setBusySkill(null)
+      }
+    },
+    [onError, onNotice, onRefresh, sessionId, skills],
+  )
+
   const needle = query.trim().toLowerCase()
 
   const filtered = skills.filter((skill) =>
@@ -668,10 +811,13 @@ function SkillsTab({
                 <span className="muted small">
                   v{skill.version}
                 </span>
+                {skill.preloaded && (
+                  <span className="chip chip-on">preloaded</span>
+                )}
                 {skill.used && (
                   <span className="chip chip-on">used</span>
                 )}
-                {skill.active && !skill.used && (
+                {skill.active && !skill.used && !skill.preloaded && (
                   <span className="chip chip-on">active</span>
                 )}
                 {skill.loaded && !skill.active && (
@@ -681,6 +827,27 @@ function SkillsTab({
               <p className="card-desc">
                 {skill.description || '—'}
               </p>
+              <label className="skill-preload">
+                <input
+                  type="checkbox"
+                  checked={skill.preloaded}
+                  disabled={busySkill === skill.name}
+                  onChange={(event) =>
+                    void togglePreload(
+                      skill.name,
+                      event.target.checked,
+                    )
+                  }
+                />
+                <span>
+                  Always load this into the agent
+                  <span className="muted small">
+                    {' '}
+                    puts it in every prompt for this session, so the
+                    agent never has to decide to look for it
+                  </span>
+                </span>
+              </label>
             </li>
           ))}
         </ul>
@@ -1045,8 +1212,7 @@ function ServerForm({
         {editingExisting ? 'Edit MCP server' : 'New MCP server'}
       </legend>
 
-      <label className="field">
-        <span className="field-label">Name</span>
+      <Field label="Name">
         <input
           value={name}
           placeholder="stash"
@@ -1062,11 +1228,11 @@ function ServerForm({
           }
           onChange={(event) => setName(event.target.value)}
         />
-      </label>
+      </Field>
 
-      <label className="field">
-        <span className="field-label">Transport</span>
+      <Field label="Transport">
         <select
+          className="field-control"
           value={transport}
           aria-label="Transport"
           disabled={editingExisting}
@@ -1079,48 +1245,48 @@ function ServerForm({
           <option value="stdio">stdio</option>
           <option value="http">http</option>
         </select>
-      </label>
+      </Field>
 
       {transport === 'stdio' ? (
         <>
-          <label className="field">
-            <span className="field-label">Command</span>
+          <Field label="Command">
             <input
               value={command}
               placeholder="npx"
               aria-label="Command"
               onChange={(event) => setCommand(event.target.value)}
             />
-          </label>
+          </Field>
 
-          <label className="field">
-            <span className="field-label">Arguments</span>
+          <Field
+            label="Arguments"
+            hint="Split on spaces"
+          >
             <input
               value={args}
               placeholder="-y package-name"
               aria-label="Arguments"
               onChange={(event) => setArgs(event.target.value)}
             />
-          </label>
+          </Field>
         </>
       ) : (
-        <label className="field">
-          <span className="field-label">URL</span>
+        <Field label="URL">
           <input
             value={url}
             placeholder="http://127.0.0.1:8931/mcp"
             aria-label="URL"
             onChange={(event) => setUrl(event.target.value)}
           />
-        </label>
+        </Field>
       )}
 
-      <label className="field">
-        <span className="field-label">
-          Environment (one KEY=value per line)
-        </span>
+      <Field
+        label="Environment"
+        hint="One KEY=value per line"
+      >
         <textarea
-          className="settings-textarea"
+          className="field-textarea"
           value={env}
           aria-label="Environment"
           placeholder={
@@ -1133,7 +1299,7 @@ function ServerForm({
             setEnvTouched(true)
           }}
         />
-      </label>
+      </Field>
 
       {editingExisting ? (
         <p className="muted small">
@@ -1243,6 +1409,12 @@ function ServerCard({
       {server.error && (
         <p className="card-error">{server.error}</p>
       )}
+
+      {(server.warnings ?? []).map((warning) => (
+        <p className="card-warning" key={warning}>
+          {warning}
+        </p>
+      ))}
 
       <div className="server-actions">
         {connected ? (

@@ -241,6 +241,36 @@ class EvidenceStore:
 
         return evidence
 
+    def retain_only(
+        self,
+        keep: tuple[str, ...],
+    ) -> int:
+        """Drop everything not in ``keep``. Returns how many went.
+
+        The store is append-only by design, which is right for a run
+        and wrong for a retry: evidence gathered by an attempt the user
+        threw away would otherwise stay counted, and a research
+        contract would read as satisfied by work nobody is looking at
+        any more.
+
+        Anything discarded is unpinned too. A pin exists to keep a
+        checkpoint's citation alive, and an item no longer in the store
+        has nothing to keep alive.
+        """
+
+        surviving = set(keep)
+        removed = [
+            evidence_id
+            for evidence_id in self._items
+            if evidence_id not in surviving
+        ]
+
+        for evidence_id in removed:
+            self._items.pop(evidence_id, None)
+            self._pinned.discard(evidence_id)
+
+        return len(removed)
+
     def get(
         self,
         evidence_id: str,

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import time
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -14,7 +13,11 @@ from agent_workflow.core.entities.models.tool_registry import (
     ToolRegistry,
     ToolRegistryError,
 )
-from agent_workflow.core.infrastructure.config import MCPConfig
+from agent_workflow.core.infrastructure.config import (
+    MCPConfig,
+    server_configuration_warnings,
+)
+from agent_workflow.core.infrastructure.mcp.pool import MCPProcessPool
 from agent_workflow.core.infrastructure.mcp.client import (
     MCPClient,
     MCPServerConfig,
@@ -23,12 +26,12 @@ from agent_workflow.core.infrastructure.mcp.protocol import (
     MCPError,
     MCPToolError,
     ToolDescriptor,
-    tool_error,
     tool_result_text,
 )
 from agent_workflow.core.infrastructure.mcp.schema import (
     build_input_dataclass,
     property_names,
+    remote_field_map,
 )
 
 
@@ -68,8 +71,38 @@ class MCPServerInfo:
     protocol_version: str = ""
     instructions: str = ""
     tools: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
     connected_at: float = 0.0
     duration_seconds: float = 0.0
+
+
+def _server_info(
+    entry: Any,
+    state: MCPServerState,
+) -> MCPServerInfo:
+    """Build the public view of one configured server.
+
+    One builder for both call sites, so a field added here shows up
+    whether the manager was constructed with a config or the config
+    was replaced at runtime.
+    """
+
+    return MCPServerInfo(
+        name=entry.name,
+        command=entry.command,
+        transport=entry.transport,
+        url=entry.url,
+        args=entry.args,
+        enabled=entry.enabled,
+        state=state,
+        # Computed here rather than stored on the entry so a config
+        # built in code is checked too, not just one parsed from TOML.
+        warnings=server_configuration_warnings(
+            entry.command,
+            entry.args,
+            entry.env,
+        ),
+    )
 
 
 class MCPManager:
@@ -85,9 +118,19 @@ class MCPManager:
         config: MCPConfig,
         registry: ToolRegistry,
         permissions: frozenset[str] | None = None,
+        *,
+        pool: "MCPProcessPool | None" = None,
+        owner: str = "",
     ) -> None:
         self._config = config
         self._registry = registry
+        # A process pool shared across sessions. Without one each
+        # session starts its own, so a container-backed stdio server
+        # costs a container per session. The owner id is what the
+        # pool counts to decide when nobody is left holding a
+        # process.
+        self._pool = pool
+        self._owner = owner or "default"
         self._permissions = permissions or frozenset()
 
         self._clients: dict[str, MCPClient] = {}
@@ -101,14 +144,9 @@ class MCPManager:
             self._timeouts[entry.name] = entry.request_timeout
             self._entries[entry.name] = entry
 
-            self._servers[entry.name] = MCPServerInfo(
-                name=entry.name,
-                command=entry.command,
-                transport=entry.transport,
-                url=entry.url,
-                args=entry.args,
-                enabled=entry.enabled,
-                state=(
+            self._servers[entry.name] = _server_info(
+                entry,
+                (
                     MCPServerState.DISABLED
                     if not entry.enabled
                     else MCPServerState.PENDING
@@ -245,14 +283,9 @@ class MCPManager:
 
             self._entries[name] = entry
             self._timeouts[name] = entry.request_timeout
-            self._servers[name] = MCPServerInfo(
-                name=entry.name,
-                command=entry.command,
-                transport=entry.transport,
-                url=entry.url,
-                args=entry.args,
-                enabled=entry.enabled,
-                state=MCPServerState.PENDING,
+            self._servers[name] = _server_info(
+                entry,
+                MCPServerState.PENDING,
             )
 
             try:
@@ -316,8 +349,15 @@ class MCPManager:
 
         client = self._clients.pop(name, None)
 
+        entry = self._entries.get(name)
+
         if client is not None:
-            await client.close()
+            if self._pool is not None and entry is not None:
+                # Hands the process back rather than killing it: other
+                # sessions may still be using this one.
+                await self._pool.release(entry, self._owner)
+            else:
+                await client.close()
 
         if info is not None:
             info.state = MCPServerState.CLOSED
@@ -376,54 +416,48 @@ class MCPManager:
 
         client: Any
 
-        if getattr(entry, "transport", "stdio") == "http":
-            from agent_workflow.core.infrastructure.mcp.http_client import (
-                MCPHttpClient,
-                MCPHttpConfig,
-            )
-
-            client = MCPHttpClient(
-                MCPHttpConfig(
-                    url=entry.url,
-                    headers=dict(getattr(entry, "headers", {}) or {}),
-                    startup_timeout=entry.startup_timeout,
-                    request_timeout=entry.request_timeout,
-                )
-            )
-        else:
-            client = MCPClient(
-                MCPServerConfig(
-                    name=entry.name,
-                    command=entry.command,
-                    args=tuple(entry.args),
-                    env=dict(entry.env),
-                    enabled=entry.enabled,
-                    startup_timeout=entry.startup_timeout,
-                    request_timeout=entry.request_timeout,
-                    prefix=entry.prefix,
-                )
-            )
+        def build() -> Any:
+            return _build_client(entry)
 
         started = time.monotonic()
 
-        try:
-            server_info = await client.connect()
-            descriptors = await client.list_tools()
+        if self._pool is not None:
+            try:
+                (
+                    client,
+                    descriptors,
+                    server_info,
+                ) = await self._pool.acquire(
+                    entry,
+                    self._owner,
+                    build,
+                )
+            except Exception as exc:
+                info.state = MCPServerState.FAILED
+                info.error = str(exc)
 
-        except Exception as exc:
-            detail = str(exc)
+                return info
+        else:
+            client = build()
 
-            tail = client.stderr_tail()
+            try:
+                server_info = await client.connect()
+                descriptors = await client.list_tools()
 
-            if tail:
-                detail = f"{detail} | server stderr: {tail}"
+            except Exception as exc:
+                detail = str(exc)
 
-            info.state = MCPServerState.FAILED
-            info.error = detail
+                tail = client.stderr_tail()
 
-            await client.close()
+                if tail:
+                    detail = f"{detail} | server stderr: {tail}"
 
-            return info
+                info.state = MCPServerState.FAILED
+                info.error = detail
+
+                await client.close()
+
+                return info
 
         self._clients[entry.name] = client
 
@@ -472,6 +506,7 @@ class MCPManager:
 
         remote_names = property_names(schema)
         required = _required_names(schema)
+        field_map = remote_field_map(schema)
 
         info = MCPToolInfo(
             server=server,
@@ -496,7 +531,7 @@ class MCPManager:
                     handler=_build_handler(
                         client,
                         descriptor.name,
-                        remote_names,
+                        field_map,
                     ),
                     policy=policy,
                 )
@@ -512,6 +547,87 @@ class MCPManager:
 
         if server_info is not None:
             server_info.tools.append(qualified)
+
+        self._register_batch_tool(
+            server,
+            client,
+            descriptor,
+            policy,
+        )
+
+    def _register_batch_tool(
+        self,
+        server: str,
+        client: MCPClient,
+        descriptor: ToolDescriptor,
+        policy: ToolPolicy,
+    ) -> None:
+        """Offer the same call again as a list, where asked for.
+
+        A tool that edits one thing at a time makes bulk work cost one
+        model turn and one approval per item. Ten tag descriptions were
+        ten rounds of generate/approve/write, and the wait for a human
+        to approve each one dominated everything else.
+
+        The batch runs the same call with each set of arguments, so
+        there is one code path and no second way to be wrong.
+
+        Opt-in per tool: a batch twin for everything doubles the tool
+        list, and a model offered a long list picks worse than one
+        offered a short one.
+        """
+
+        if not self._config.batches(descriptor.name):
+            return
+
+        qualified = client.qualify(descriptor.name)
+
+        if qualified.endswith("_batch"):
+            # A server that already exposes a batch tool keeps its own;
+            # overwriting it would break the remote contract.
+            return
+
+        name = f"{qualified}_batch"
+
+        if self._registry.has(name) or name in self._tools:
+            return
+
+        description = _batch_description(
+            descriptor,
+            qualified,
+            self._config.batch_concurrency,
+        )
+
+        try:
+            self._registry.register(
+                Tool(
+                    name=name,
+                    description=description,
+                    input_type=BatchCallInput,
+                    handler=_build_batch_handler(
+                        client,
+                        descriptor.name,
+                        self._config.batch_concurrency,
+                    ),
+                    # Same permissions as the single call, never fewer:
+                    # a batch must not be the cheaper way to do
+                    # something that needed approval.
+                    policy=policy,
+                )
+            )
+        except ToolRegistryError:
+            return
+
+        self._tools[name] = MCPToolInfo(
+            server=server,
+            remote_name=f"{descriptor.name} (batch)",
+            qualified_name=name,
+            description=description,
+            parameters=("calls",),
+            required=("calls",),
+            permissions=policy.permissions,
+            requires_approval=policy.requires_approval,
+        )
 
     async def close(self) -> None:
         for name in list(self._clients):
@@ -587,7 +703,7 @@ def _description_with_prefix(
 def _build_handler(
     client: MCPClient,
     remote_name: str,
-    remote_names: list[str],
+    field_map: dict[str, str],
 ):
     """Adapt a decoded dataclass instance back to MCP arguments.
 
@@ -595,13 +711,17 @@ def _build_handler(
     original schema names are restored here.
     """
 
+
     async def handler(
         arguments: Any,
         context: Any,
     ) -> str:
         del context
 
-        payload = _to_arguments(arguments, remote_names)
+        payload = _to_arguments(
+            arguments,
+            field_map,
+        )
 
         try:
             response = await client.call_tool(
@@ -627,8 +747,18 @@ def _error_text(message: str) -> str:
 
 def _to_arguments(
     arguments: Any,
-    remote_names: list[str],
+    field_map: dict[str, str],
 ) -> dict[str, Any]:
+    """Map a decoded dataclass onto the server's argument names.
+
+    Mapping is by name. An earlier version mapped by position over
+    the schema's property order, which silently shifted every value
+    into the neighbouring parameter as soon as one optional argument
+    was omitted: a call carrying only ``per_page`` was sent as
+    ``page``. Because only supplied fields survive decoding, position
+    carries no information here.
+    """
+
     from dataclasses import asdict, is_dataclass
 
     if not is_dataclass(arguments):
@@ -639,16 +769,235 @@ def _to_arguments(
 
     values = asdict(arguments)
 
-    if not remote_names:
-        return values
-
-    # Map sanitised field names back onto the server's names.
-    ordered = list(values)
+    # Only parameters the model actually supplied. Optional fields
+    # are decoded to None, and sending an explicit null makes a
+    # server with a non-null default reject the call
+    # ("None is not of type 'string'"), which left the agent retrying
+    # a request that could never succeed.
+    values = {
+        key: value
+        for key, value in values.items()
+        if value is not None
+    }
 
     payload: dict[str, Any] = {}
+    unmapped: list[tuple[str, Any]] = []
 
-    for index, remote in enumerate(remote_names):
-        if index < len(ordered):
-            payload[remote] = values[ordered[index]]
+    for key, value in values.items():
+        remote = field_map.get(key)
+
+        if remote is None:
+            # Cannot happen with the table built from the same
+            # schema; kept so a mismatch is visible instead of
+            # silently dropping an argument.
+            unmapped.append((key, value))
+            continue
+
+        payload[remote] = value
+
+    for key, value in unmapped:
+        payload[key] = value
 
     return payload
+
+
+def _build_client(entry: Any) -> Any:
+    """Construct the transport client for one server entry."""
+
+    if getattr(entry, "transport", "stdio") == "http":
+        from agent_workflow.core.infrastructure.mcp.http_client import (
+            MCPHttpClient,
+            MCPHttpConfig,
+        )
+
+        return MCPHttpClient(
+            MCPHttpConfig(
+                url=entry.url,
+                headers=dict(getattr(entry, "headers", {}) or {}),
+                startup_timeout=entry.startup_timeout,
+                request_timeout=entry.request_timeout,
+            )
+        )
+
+    return MCPClient(
+        MCPServerConfig(
+            name=entry.name,
+            command=entry.command,
+            args=tuple(entry.args),
+            env=dict(entry.env),
+            enabled=entry.enabled,
+            startup_timeout=entry.startup_timeout,
+            request_timeout=entry.request_timeout,
+            prefix=entry.prefix,
+        )
+    )
+
+
+# ======================================================================
+# Batch calls
+# ======================================================================
+
+
+@dataclass(slots=True, frozen=True)
+class BatchCall:
+    """One set of arguments for the batched tool."""
+
+    arguments: dict[str, Any]
+    """Opaque to us: it is whatever the single-call tool takes."""
+
+
+@dataclass(slots=True, frozen=True)
+class BatchCallInput:
+    """Arguments of a ``*_batch`` tool."""
+
+    calls: list[BatchCall]
+
+
+MAX_BATCH_ITEMS = 100
+
+
+def _batch_description(
+    descriptor: ToolDescriptor,
+    qualified: str,
+    concurrency: int,
+) -> str:
+    purpose = (descriptor.description or "").strip()
+
+    return (
+        f"Call {qualified} for many items at once. Each entry in "
+        "calls carries the same arguments the single tool takes, so "
+        "use this instead of repeating that tool once per item.\n\n"
+        f"Underlying tool: {descriptor.name}. "
+        f"{purpose}\n\n"
+        f"At most {MAX_BATCH_ITEMS} items per call, up to "
+        f"{concurrency} in flight. Every item is attempted: a failure "
+        "is reported against that item and the rest still run, so read "
+        "the per-item results rather than assuming all of them "
+        "succeeded."
+    )
+
+
+def _looks_like_failure(text: str) -> bool:
+    """Whether a success-shaped result is actually an error.
+
+    The protocol has ``isError`` for this, and ``tool_result_text``
+    honours it. Servers in the wild do not always set it: the Stash MCP
+    server returns "Error calling tool 'x': ..." as ordinary content.
+    Counting that as a success is the worst outcome available here --
+    the report says everything worked while nothing did, and the model
+    moves on believing it.
+    """
+
+    head = text.lstrip()[:80].lower()
+
+    return head.startswith(
+        ("error calling tool", "error:", "error -")
+    )
+
+
+def _describe_item(
+    index: int,
+    outcome: Any,
+) -> tuple[str, str]:
+    """One line per item: what was asked, and what came back.
+
+    Failures are named here rather than raised. A batch of fifty where
+    three items were rejected is a normal outcome, and the other
+    forty-seven have already been written on the far side.
+    """
+
+    if isinstance(outcome, BaseException):
+        return "failed", f"{type(outcome).__name__}: {outcome}"
+
+    try:
+        text = tool_result_text(outcome)
+    except MCPToolError as exc:
+        # The server reported a failure. That is an answer about this
+        # item, not a reason to abandon the others.
+        return "failed", str(exc)
+
+    if _looks_like_failure(text):
+        return "failed", text
+
+    return "ok", text
+
+
+def _build_batch_handler(
+    client: MCPClient,
+    remote_name: str,
+    concurrency: int,
+):
+    """Run one remote tool over a list of argument sets."""
+
+    async def handler(
+        arguments: Any,
+        context: Any,
+    ) -> str:
+        del context
+
+        items = list(getattr(arguments, "calls", ()) or ())
+
+        if not items:
+            return "Nothing to do: calls was empty."
+
+        if len(items) > MAX_BATCH_ITEMS:
+            return (
+                f"Error: {len(items)} items exceeds the limit of "
+                f"{MAX_BATCH_ITEMS}. Split it into batches; a "
+                "rejected batch writes nothing, so this is reported "
+                "before any call is made."
+            )
+
+        payloads: list[dict[str, Any]] = []
+
+        for index, item in enumerate(items):
+            payload = getattr(item, "arguments", None)
+
+            if not isinstance(payload, dict) or not payload:
+                return (
+                    f"Error: item {index} has no arguments. Each "
+                    "entry needs the fields the single tool takes."
+                )
+
+            payloads.append(dict(payload))
+
+        outcomes = await client.call_tools_concurrently(
+            [(remote_name, payload) for payload in payloads],
+            limit=concurrency,
+        )
+
+        ok = sum(
+            1 for outcome in outcomes
+            if not isinstance(outcome, BaseException)
+        )
+
+        lines = [
+            f"{remote_name}: {ok} of {len(outcomes)} succeeded."
+        ]
+
+        if ok != len(outcomes):
+            lines.append("")
+            lines.append("Failed items:")
+
+        for index, outcome in enumerate(outcomes):
+            status, text = _describe_item(index, outcome)
+
+            if status == "ok":
+                continue
+
+            lines.append(
+                f"  [{index}] {text.splitlines()[0][:160]}"
+            )
+
+        lines.append("")
+        lines.append("All items:")
+        lines.append("")
+
+        for index, outcome in enumerate(outcomes):
+            status, text = _describe_item(index, outcome)
+            head = text.splitlines()[0][:160] if text else ""
+            lines.append(f"  [{index}] {status}: {head}")
+
+        return "\n".join(lines)
+
+    return handler

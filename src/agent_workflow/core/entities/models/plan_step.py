@@ -14,6 +14,30 @@ class PlanStepStatus(StrEnum):
     FAILED = "failed"
     SKIPPED = "skipped"
 
+    @property
+    def todo_marker(self) -> str:
+        """Checkbox glyph, as a reader-scannable list would show it.
+
+        One status, one marker, defined once: the model reading the
+        prompt and the user reading the panel must not see two
+        different vocabularies for the same state.
+
+        Markers are distinct rather than a tick-and-cross pair so a
+        failed step reads as something that happened and was not done,
+        not as a step to retry on sight.
+        """
+
+        return _TODO_MARKERS[self]
+
+
+_TODO_MARKERS: dict[PlanStepStatus, str] = {
+    PlanStepStatus.COMPLETED: "[✓]",
+    PlanStepStatus.ACTIVE: "[•]",
+    PlanStepStatus.PENDING: "[○]",
+    PlanStepStatus.FAILED: "[✗]",
+    PlanStepStatus.SKIPPED: "[-]",
+}
+
 
 @dataclass(slots=True, frozen=True)
 class DelegationHint:

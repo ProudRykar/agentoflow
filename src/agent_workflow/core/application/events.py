@@ -71,15 +71,42 @@ class EventBus:
     def replay_since(
         self,
         seq: int,
+        *,
+        backfill: Callable[[int], list[StoredEvent]] | None = None,
     ) -> list[StoredEvent]:
         """Events strictly newer than ``seq``, oldest first.
 
-        When the requested ``seq`` has already been evicted the
-        oldest retained event is returned instead, so the client
-        can resynchronise rather than silently skip a gap.
+        The in-memory buffer is bounded, so for a long session it
+        holds only the most recent slice. Replaying a cursor from
+        before that slice would silently hand back a truncated
+        history and the reader would find the top of the
+        conversation missing with no way to scroll to it.
+
+        ``backfill`` reads the evicted prefix from durable storage.
+        It is asked for only when the gap is real, and its result is
+        merged ahead of the retained events so the sequence stays
+        contiguous.
         """
 
-        return [
+        oldest = self.oldest_retained_seq()
+
+        # An empty buffer retains nothing at all, so the durable log is
+        # the only copy of the session. Guarding on a non-empty buffer
+        # treated that as "no gap" and replayed nothing, which is how a
+        # session whose events all failed to decode came back blank.
+        retained = bool(self._history)
+        has_gap = not retained or seq + 1 < oldest
+
+        prefix: list[StoredEvent] = []
+
+        if backfill is not None and has_gap:
+            prefix = [
+                stored
+                for stored in backfill(seq)
+                if stored.seq > seq and (not retained or stored.seq < oldest)
+            ]
+
+        return prefix + [
             stored
             for stored in self._history
             if stored.seq > seq

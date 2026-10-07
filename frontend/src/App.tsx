@@ -5,6 +5,7 @@ import {
   createSession,
   listSessions,
   renameSession,
+  regenerateRun,
   sendMessage,
   setApiToken,
 } from './api/client'
@@ -21,6 +22,7 @@ import {
   toggleEntry,
 } from './stores/transcript'
 import type { AppState } from './stores/transcript'
+import { useTheme } from './theme'
 import { SessionSocket } from './websocket/SessionSocket'
 import './App.css'
 import './features/tools/ToolsPage.css'
@@ -57,6 +59,7 @@ export default function App() {
   const [collapsed, setCollapsed] = useState(false)
   const [view, setView] = useState<'chat' | 'tools'>('chat')
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const { theme, toggle: toggleTheme } = useTheme()
 
   const socketRef = useRef<SessionSocket | null>(null)
   const cursorRef = useRef(-1)
@@ -184,6 +187,19 @@ export default function App() {
     [currentId, refreshSessions],
   )
 
+  const handleRegenerate = useCallback(
+    (hint: string) => {
+      if (!currentId) {
+        return
+      }
+
+      void regenerateRun(currentId, hint)
+        .then(() => refreshSessions())
+        .catch((cause) => setError(describe(cause)))
+    },
+    [currentId, refreshSessions],
+  )
+
   const handleRename = useCallback(
     async (sessionId: string, title: string) => {
       try {
@@ -226,6 +242,8 @@ export default function App() {
           onToggle={() => setCollapsed(!collapsed)}
           onView={setView}
           onOpenSettings={() => setSettingsOpen(true)}
+          theme={theme}
+          onToggleTheme={toggleTheme}
         />
 
         <main className="workspace-main">
@@ -257,6 +275,7 @@ export default function App() {
               connection={state.connection}
               onSend={handleSend}
               onToggle={handleToggle}
+              onRegenerate={handleRegenerate}
             />
           ) : (
             <div className="empty">

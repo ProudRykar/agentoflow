@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -9,6 +10,10 @@ from agent_workflow.core.entities.models.agent import Agent
 from agent_workflow.core.entities.models.approval import ApprovalRequest
 from agent_workflow.core.entities.models.approval_hook import ApprovalHook
 from agent_workflow.core.application.subagents import build_subagent_stack
+from agent_workflow.core.context.compaction import (
+    CompactionPolicy,
+    Compactor,
+)
 from agent_workflow.core.context.context_assembler import ContextAssembler
 from agent_workflow.core.context.context_controller import ContextController
 from agent_workflow.core.context.history import InMemoryHistoryStore
@@ -16,8 +21,23 @@ from agent_workflow.core.context.tokens import counter_for_model
 from agent_workflow.core.entities.models.builtin.history_tools import (
     create_history_tool,
 )
-from agent_workflow.core.entities.models.builtin.memory_registry import create_memory_tools
-from agent_workflow.core.entities.models.builtin.registry import create_builtin_registry
+from agent_workflow.core.entities.models.builtin.memory_registry import (
+    create_memory_tools,
+    create_todo_tools,
+)
+from agent_workflow.core.entities.models.tool_toggle import ToolToggle
+from agent_workflow.core.infrastructure.mcp.pool import MCPProcessPool
+from agent_workflow.core.entities.models.builtin.registry import (
+    create_builtin_registry,
+)
+from agent_workflow.core.entities.models.builtin.tools import (
+    build_search_backend,
+    create_graphql_tool,
+    create_python_tool,
+    create_stash_list_tags_tool,
+    create_stash_entity_schema_tool,
+    create_stash_tag_overlap_tool,
+)
 from agent_workflow.core.entities.models.context_manager import ContextManager
 from agent_workflow.core.context.context_budget import ContextBudget
 from agent_workflow.core.entities.models.context_policy import ContextPolicy
@@ -38,7 +58,10 @@ from agent_workflow.core.entities.models.skills.tools import create_skills_tools
 from agent_workflow.core.entities.models.plugins.tools import create_plugins_tools
 from agent_workflow.core.entities.models.tool import ToolContext
 from agent_workflow.core.entities.models.tool_executor import ToolExecutor
-from agent_workflow.core.infrastructure.config import Config, ConfigLoader
+from agent_workflow.core.infrastructure.config import (
+    Config,
+    ConfigLoader,
+)
 from agent_workflow.core.infrastructure.ollama_client import (
     OllamaClient,
     OllamaOptions,
@@ -58,6 +81,8 @@ ApprovalHandler = Callable[
 
 STATS_DATABASE = "tool-usage.db"
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass(slots=True)
 class AgentRuntime:
@@ -70,6 +95,10 @@ class AgentRuntime:
     # can still compute permissions.
     plugin_manager: PluginManager | None = None
     mcp_manager: MCPManager | None = None
+
+    # Owns which tools are switched off. None only for a runtime
+    # built by hand in a test.
+    tool_toggle: ToolToggle | None = None
 
     # Permissions granted by the harness itself, before any
     # plugin or MCP contribution. Kept so the effective set can be
@@ -106,6 +135,8 @@ async def create_runtime(
     approval_handler: ApprovalHandler,
     working_directory: Path | None = None,
     stats_store: ToolStatsStore | None = None,
+    mcp_pool: MCPProcessPool | None = None,
+    session_id: str = "",
 ) -> AgentRuntime:
     """Build one self-contained runtime.
 
@@ -127,10 +158,46 @@ async def create_runtime(
 
     memory = MemoryManager(store)
 
-    registry = create_builtin_registry()
+    # The search engine comes from configuration, so a SearXNG
+    # instance is picked up without touching code here.
+    registry = create_builtin_registry(
+        search=build_search_backend(config.web),
+    )
 
     for tool in create_memory_tools(memory):
         registry.register(tool)
+
+    for tool in create_todo_tools():
+        registry.register(tool)
+
+    if config.python.enabled:
+        registry.register(create_python_tool(config.python))
+
+    graphql_tool = create_graphql_tool(config.graphql)
+
+    if graphql_tool is not None:
+        registry.register(graphql_tool)
+
+    # Shares the GraphQL client built above: one endpoint, one
+    # credential, one place where the key is read.
+    list_tags_tool = create_stash_list_tags_tool(config.graphql)
+
+    if list_tags_tool is not None:
+        registry.register(list_tags_tool)
+
+    # Duplicate analysis needs usage data, not names. Shares the same
+    # GraphQL client as the two tools above.
+    overlap_tool = create_stash_tag_overlap_tool(config.graphql)
+
+    if overlap_tool is not None:
+        registry.register(overlap_tool)
+
+    # Field names are the other way a query gets rejected, and guessing
+    # them is what produces a tool call that looks like a broken tool.
+    schema_tool = create_stash_entity_schema_tool(config.graphql)
+
+    if schema_tool is not None:
+        registry.register(schema_tool)
 
     working_directory = working_directory or Path.cwd()
 
@@ -170,9 +237,24 @@ async def create_runtime(
     # The budget has to describe the model that will actually read
     # it. A hardcoded 32k while Ollama runs with its own default is
     # how a "within budget" request still gets rejected upstream.
-    context_size = _model_context_size(
+    declared_size = _model_context_size(
         paths.resolve(config.models.catalog or "models.toml"),
         config.llm.model,
+    )
+
+    # Ask the server what the model really has. The catalog is a
+    # hand-written file that goes stale, and it is also what sets
+    # num_ctx, so a wrong value there is not merely a wrong number in
+    # the UI -- it either leaves capacity unused or asks for more than
+    # the model will serve.
+    real_size = await _reported_context_size(
+        config.llm.model,
+    )
+
+    context_size = _effective_context_size(
+        declared_size,
+        real_size,
+        model_name=config.llm.model,
     )
 
     budget = ContextBudget.for_model(context_size)
@@ -190,6 +272,14 @@ async def create_runtime(
 
     executor = ToolExecutor(
         registry,
+        # A single result may not outgrow the window it has to fit in.
+        # Sized so one tool call still has room to be worth reading:
+        # a third of the budget leaves the dialogue, evidence, memory
+        # and history somewhere to live.
+        output_allowance=max(
+            1_000,
+            assembler.budget.available // 3,
+        ),
     )
 
     llm = OllamaClient(
@@ -219,6 +309,21 @@ async def create_runtime(
         skill_manager=skill_manager,
     )
 
+    # Compaction uses the same client as the run: the model already
+    # doing the work is the cheapest summariser there is, and it
+    # writes the note in its own terms.
+    compactor = (
+        Compactor(
+            llm=llm,
+            counter=counter,
+            policy=CompactionPolicy(
+                target_tokens=config.context.compaction_tokens,
+            ),
+        )
+        if config.context.compaction
+        else None
+    )
+
     agent = Agent(
         llm=llm,
         registry=registry,
@@ -228,16 +333,20 @@ async def create_runtime(
         controller=controller,
         memory=memory,
         max_iterations=config.agent.max_iterations,
+        price_per_million=config.agent.price_per_million,
+        max_prompt_tokens=config.agent.max_prompt_tokens,
         hooks=(
             guardrail_hook,
             ApprovalHook(
                 handler=approval_handler,
                 shell_policy=shell_policy,
                 registry=registry,
+                remember_approvals=config.approval.remember,
             ),
         ),
         skill_manager=skill_manager,
         plugin_manager=plugin_manager,
+        compactor=compactor,
     )
 
     # Register skills management tools
@@ -262,9 +371,17 @@ async def create_runtime(
     mcp_manager = MCPManager(
         config.mcp,
         registry,
+        pool=mcp_pool,
+        owner=session_id,
     )
 
     await mcp_manager.connect_all()
+
+    # Applied here rather than next to the builtin registration,
+    # because MCP tools only exist once their servers have connected.
+    tool_toggle = ToolToggle(registry, config.tools)
+
+    tool_toggle.apply()
 
     # Skills and plugins bring their own permissions. They are
     # granted for the session; mutating tools additionally set
@@ -274,9 +391,17 @@ async def create_runtime(
         "filesystem.write",
         "memory.read",
         "memory.write",
+        # The checklist is the model's own planning surface, not
+        # something the user has to approve: granting it separately
+        # would mean a run could not plan itself by default.
+        "plan.read",
+        "plan.write",
         "history.read",
         "shell.execute",
+        "python.execute",
         "web.fetch",
+        "web.search",
+        "graphql.execute",
         "skills.read",
         "skills.write",
         "plugins.read",
@@ -347,6 +472,7 @@ async def create_runtime(
         config=config,
         plugin_manager=plugin_manager,
         mcp_manager=mcp_manager,
+        tool_toggle=tool_toggle,
         base_permissions=base_permissions,
         stats_store=(
             stats_store
@@ -354,6 +480,76 @@ async def create_runtime(
             else ToolStatsStore(paths.resolve(STATS_DATABASE))
         ),
     )
+
+async def _reported_context_size(
+    model_name: str,
+) -> int | None:
+    """What the Ollama server says this model's window is."""
+
+    from agent_workflow.core.infrastructure.ollama_client import (
+        OllamaClient,
+    )
+
+    try:
+        return await OllamaClient(
+            model=model_name
+        ).model_context_length()
+    except Exception:
+        # A missing or broken Ollama must not stop a session from
+        # starting; the catalog value still applies.
+        logger.debug(
+            "Could not read the real context length for %r",
+            model_name,
+            exc_info=True,
+        )
+        return None
+
+
+def _effective_context_size(
+    declared: int | None,
+    reported: int | None,
+    *,
+    model_name: str = "",
+) -> int | None:
+    """Reconcile the catalog with the model.
+
+    The smaller of the two wins, because that is the one that will
+    actually apply: ``num_ctx`` is set from the catalog, so a catalog
+    below the model's real window is a ceiling no query can pass. The
+    mismatch is logged because it is a configuration problem worth
+    fixing rather than absorbing silently.
+    """
+
+    if declared is None:
+        return reported
+
+    if reported is None:
+        return declared
+
+    if declared < reported:
+        logger.warning(
+            "models.toml declares a %d token context for %r but the "
+            "model reports %d; using the smaller, since num_ctx is "
+            "set from the catalog. Update the catalog to use the "
+            "full window.",
+            declared,
+            model_name,
+            reported,
+        )
+        return declared
+
+    if reported < declared:
+        logger.warning(
+            "models.toml declares a %d token context for %r but the "
+            "model reports only %d; using the model's figure.",
+            declared,
+            model_name,
+            reported,
+        )
+        return reported
+
+    return declared
+
 
 def _model_context_size(
     catalog_path: Path,
@@ -383,3 +579,4 @@ def _model_context_size(
                 return int(size)
 
     return None
+

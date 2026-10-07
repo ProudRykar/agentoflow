@@ -70,6 +70,11 @@ export interface LLMRequestedData {
   run_id: string
   parent_run_id: string | null
   estimated_tokens: number | null
+  context_limit?: number | null
+  /** Whether the count came from a real tokenizer or a heuristic. */
+  counter_exact?: boolean
+  /** Named blocks that were dropped or cut, e.g. ['memory']. */
+  dropped_blocks?: string[]
 }
 
 export interface ChunkData {
@@ -86,6 +91,11 @@ export interface LLMRespondedData {
   tool_call_count: number
   run_id: string
   parent_run_id: string | null
+  /** What the provider reported consuming, when it reported it. */
+  prompt_tokens?: number | null
+  completion_tokens?: number | null
+  /** The local estimate for the same request, for comparison. */
+  estimated_prompt_tokens?: number | null
 }
 
 export interface ToolStartedData {
@@ -136,10 +146,53 @@ export interface RunFailedData {
   error: string
 }
 
+export type PlanStepStatus =
+  | 'pending'
+  | 'active'
+  | 'completed'
+  | 'failed'
+  | 'skipped'
+
+/**
+ * The model's own checklist vocabulary.
+ *
+ * Kept apart from PlanStepStatus rather than folded into it: these are
+ * intentions written by the agent, not phase transitions decided by
+ * the runtime, and merging them would let "the harness moved on" read
+ * as "the agent finished this".
+ */
+export type TodoStatus =
+  | 'pending'
+  | 'in_progress'
+  | 'completed'
+  | 'cancelled'
+
+export interface TodoInfo {
+  id: string
+  description: string
+  status: TodoStatus
+}
+
+export interface PlanStepInfo {
+  id: string
+  description: string
+  phase: string
+  status: PlanStepStatus
+  attempts: number
+  result: string | null
+  error: string | null
+  delegation: {
+    role: string
+    power: string
+    reason: string
+  } | null
+}
+
 export type EventType =
   | 'session.snapshot'
   | 'agent.started'
   | 'agent.phase_changed'
+  | 'plan.updated'
   | 'agent.finished'
   | 'llm.requested'
   | 'llm.thinking_chunk'
@@ -161,6 +214,8 @@ export interface SkillInfo {
   active: boolean
   loaded: boolean
   used: boolean
+  /** Pinned by the reader, so it is active without the agent asking. */
+  preloaded: boolean
 }
 
 export interface PluginInfo {
@@ -225,6 +280,8 @@ export interface ToolInfo {
   name: string
   description: string
   source: 'builtin' | 'plugin' | 'mcp' | string
+  /** False when the operator has switched this tool off. */
+  enabled: boolean
   permissions: string[]
   missing_permissions: string[]
   requires_approval: boolean
@@ -252,6 +309,17 @@ export interface ToolsSummary {
 export interface ToolsResponse {
   tools: ToolInfo[]
   summary: ToolsSummary
+  /** Names currently switched off, including hidden ones. */
+  disabled: string[]
+}
+
+export interface ToolToggleResult {
+  session_id: string
+  tool: string
+  enabled: boolean
+  known: boolean
+  disabled: string[]
+  visible_tools: number
 }
 
 export interface MCPToolInfo {
@@ -276,6 +344,9 @@ export interface MCPServerInfo {
   server_version: string
   protocol_version: string
   instructions: string
+  // Optional because the field postdates some API responses, and the
+  // UI must not break against an older backend.
+  warnings?: string[]
   tools: MCPToolInfo[]
   connected_at: number
   startup_seconds: number

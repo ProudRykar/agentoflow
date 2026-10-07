@@ -15,6 +15,7 @@ from agent_workflow.core.entities.models.agent_trace import (
     AgentFinished,
     AgentPhaseChanged,
     AgentStarted,
+    PlanUpdated,
     LLMContentChunk,
     LLMRequested,
     LLMResponded,
@@ -34,6 +35,7 @@ from agent_workflow.core.entities.models.approval import (
 EVENT_TYPES: dict[type, str] = {
     AgentStarted: "agent.started",
     AgentPhaseChanged: "agent.phase_changed",
+    PlanUpdated: "plan.updated",
     LLMRequested: "llm.requested",
     LLMThinkingChunk: "llm.thinking_chunk",
     LLMContentChunk: "llm.content_chunk",

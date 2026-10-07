@@ -194,7 +194,7 @@ def tool_result_text(
         elif kind in ("image", "audio"):
             parts.append(f"[{kind} omitted]")
         elif kind == "resource":
-            parts.append(f"[resource omitted]")
+            parts.append("[resource omitted]")
         else:
             parts.append(f"[{kind or 'unknown'} block omitted]")
 

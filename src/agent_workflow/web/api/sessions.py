@@ -13,6 +13,7 @@ from agent_workflow.web.schemas import (
     ApprovalStateInfo,
     CancelResponse,
     MessageRequest,
+    RegenerateRequest,
     ResumeResponse,
     RunRequest,
     RunResponse,
@@ -404,6 +405,37 @@ async def continue_run(
         session,
         lambda: session.start_continue(body.prompt.strip()),
     )
+
+    return RunResponse(
+        session_id=session_id,
+        status="started",
+        state=session.state.value,
+    )
+
+
+@router.post("/{session_id}/regenerate", response_model=RunResponse)
+async def regenerate_run(
+    session_id: str,
+    body: RegenerateRequest,
+    request: Request,
+) -> RunResponse:
+    manager = manager_of(request)
+
+    session = await require_session(manager, session_id)
+
+    # ValueError from the session means there was no assistant turn to
+    # replace. Left to propagate it becomes a 500, which would report
+    # a server fault for something the caller asked wrongly.
+    try:
+        await _start(
+            session,
+            lambda: session.start_regenerate(body.hint),
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=409,
+            detail=str(error),
+        ) from error
 
     return RunResponse(
         session_id=session_id,

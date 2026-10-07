@@ -48,26 +48,118 @@ h3.md-heading {
   color: var(--text-dim);
 }
 
-.md-code {
-  margin: 0 0 9px;
-  padding: 10px 12px;
+.md-code-wrap {
+  margin: 0 0 11px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--bg);
-  overflow-x: auto;
-  white-space: pre;
-  font-size: 12.5px;
-  line-height: 1.45;
+  overflow: hidden;
 }
 
-.md-code[data-language]:not([data-language=''])::before {
-  content: attr(data-language);
-  display: block;
-  margin-bottom: 6px;
+.md-code-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 6px 3px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-raised);
+}
+
+.md-code-lang {
   color: var(--text-dim);
   font-size: 10.5px;
   text-transform: uppercase;
   letter-spacing: 0.06em;
+}
+
+.md-code-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 2px 4px 2px 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.md-code-caret {
+  color: var(--text-dim);
+  font-size: 9px;
+  width: 8px;
+}
+
+.md-code-meta {
+  color: var(--text-dim);
+  font-size: 10.5px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.md-code-toggle:hover .md-code-caret {
+  color: var(--text);
+}
+
+/* The collapsed preview keeps the first line only, so a long script
+   costs one row until it is wanted. */
+.md-code-collapsed {
+  padding: 8px 12px;
+  color: var(--text-dim);
+  font-family: ui-monospace, monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre;
+  text-overflow: ellipsis;
+}
+
+.md-code-wrap[data-collapsed] .md-code-bar {
+  border-bottom: 0;
+}
+
+.md-code-copy {
+  padding: 2px 8px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.md-code-copy:hover {
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.md-code-body {
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+}
+
+.md-code {
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+  padding: 10px 12px;
+  /*
+   * Wrapped, never scrolled.
+   *
+   * `overflow-x: auto` computes overflow-y to auto as well, so a code
+   * block became a scroll container on both axes and the wheel was
+   * spent there instead of moving the chat. Long lines now wrap; the
+   * indentation that survives wrapping is still readable.
+   */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12.5px;
+  line-height: 1.5;
+  tab-size: 4;
 }
 
 .md-inline-code {
@@ -80,11 +172,170 @@ h3.md-heading {
 }
 
 .md-link {
-  color: #8aa8ce;
+  color: var(--on-info-dim);
   text-decoration: underline;
   text-underline-offset: 2px;
 }
 
 .md-link:hover {
-  color: #a9c3e0;
+  color: var(--on-info);
 }
+
+/*
+ * Tables are agent output, so they can be arbitrarily wide. The
+ * wrapper scrolls horizontally and the cells wrap, rather than the
+ * transcript itself gaining a second scroll axis.
+ */
+.md-table-scroll {
+  margin: 0 0 11px;
+}
+
+.md-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.md-table th,
+.md-table td {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+  white-space: normal;
+}
+
+.md-table th {
+  background: var(--bg);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.md-table td {
+  background: transparent;
+}
+
+.md-table tbody tr:nth-child(even) td {
+  background: var(--bg);
+  opacity: 0.55;
+}
+
+.md-table code {
+  white-space: pre;
+}
+
+/*
+ * Token colours, taken from the app's own accent so highlighted code
+ * does not read as a different product. Contrast is kept at or above
+ * the surrounding text on both themes.
+ */
+.tok-keyword {
+  color: var(--tok-keyword);
+  font-weight: 600;
+}
+
+.tok-string {
+  color: var(--tok-string);
+}
+
+.tok-number {
+  color: var(--tok-number);
+}
+
+.tok-comment {
+  color: var(--tok-comment);
+  font-style: italic;
+}
+
+.tok-function {
+  color: var(--tok-function);
+}
+
+.tok-constant {
+  color: var(--tok-constant);
+}
+
+.tok-property {
+  color: var(--tok-property);
+}
+
+.tok-operator {
+  color: var(--tok-operator);
+}
+
+.tok-added {
+  color: var(--tok-added);
+}
+
+.tok-removed {
+  color: var(--tok-removed);
+}
+
+/*
+ * A rule is a separator, so it is muted rather than solid: at full
+ * text colour it competes with the content around it.
+ */
+.md-rule {
+  margin: 14px 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+
+.md-list-item {
+  margin: 2px 0;
+}
+
+/* A task item is a checkbox plus text, so the marker stops being a
+   disc and the text hangs aligned under itself. */
+.md-list-item[data-task] {
+  list-style: none;
+  margin-left: -18px;
+  display: flex;
+  gap: 7px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.md-task {
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.6;
+  flex-shrink: 0;
+}
+
+.md-task[data-checked] {
+  color: var(--accent);
+}
+
+.md-list-text {
+  min-width: 0;
+  flex: 1;
+}
+
+/* A sublist is a real nested list, so its margin has to be tighter
+   than a top level one or the indent grows twice per level. */
+.md-list-children {
+  flex-basis: 100%;
+  margin: 2px 0 2px 4px;
+}
+
+.md-list-children > .md-list {
+  margin-bottom: 0;
+}
+
+.md-list-children > .md-list:last-child {
+  margin-bottom: 0;
+}
+
+.md-list-children .md-list {
+  margin: 2px 0;
+  padding-left: 18px;
+}
+
+del {
+  color: var(--text-dim);
+  text-decoration-color: var(--text-dim);
+}
+
+

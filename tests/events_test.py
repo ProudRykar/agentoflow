@@ -4,7 +4,8 @@ import asyncio
 
 import pytest
 
-from agent_workflow.core.application.events import EventBus
+from agent_workflow.core.application.event_store import EventStore
+from agent_workflow.core.application.events import EventBus, StoredEvent
 from agent_workflow.core.entities.models.agent_trace import (
     AgentFinished,
     AgentStarted,
@@ -233,3 +234,83 @@ def test_snapshot_returns_history() -> None:
     bus = EventBus()
 
     assert bus.snapshot() == []
+
+
+def _chunk(index: int):
+    return LLMContentChunk(iteration=1, content=f"chunk {index} ")
+
+
+def test_replay_backfills_when_the_buffer_is_empty(tmp_path) -> None:
+    """An empty buffer means the durable log is the only copy.
+
+    ``oldest_retained_seq`` answers 0 for an empty buffer, so the
+    ``seq < oldest`` filter would keep nothing, and a guard that
+    required a non-empty buffer then skipped the store altogether: the
+    replay came back empty even though every event was on disk.
+    """
+
+    store = EventStore(tmp_path / "events.db")
+
+    store.append(
+        "s1",
+        [StoredEvent(seq=index, event=_chunk(index)) for index in range(1, 6)],
+    )
+
+    bus = EventBus(history_limit=10)
+
+    replayed = bus.replay_since(
+        -1,
+        backfill=lambda seq: store.load("s1", after_seq=seq),
+    )
+
+    assert [stored.seq for stored in replayed] == [1, 2, 3, 4, 5]
+
+
+def test_replay_stays_contiguous_across_the_backfill_boundary(
+    tmp_path,
+) -> None:
+    store = EventStore(tmp_path / "events.db")
+
+    store.append(
+        "s1",
+        [StoredEvent(seq=index, event=_chunk(index)) for index in range(1, 61)],
+    )
+
+    bus = EventBus(history_limit=10)
+    bus.restore(store.load("s1"))
+
+    assert bus.oldest_retained_seq() == 51
+
+    replayed = bus.replay_since(
+        -1,
+        backfill=lambda seq: store.load("s1", after_seq=seq),
+    )
+
+    assert [stored.seq for stored in replayed] == list(range(1, 61))
+
+
+def test_replay_from_a_cursor_inside_the_buffer_skips_the_store(
+    tmp_path,
+) -> None:
+    """A reconnect that lost nothing must not re-read the whole log."""
+
+    store = EventStore(tmp_path / "events.db")
+
+    store.append(
+        "s1",
+        [StoredEvent(seq=index, event=_chunk(index)) for index in range(1, 21)],
+    )
+
+    bus = EventBus(history_limit=20)
+    bus.restore(store.load("s1"))
+
+    asked: list[int] = []
+
+    replayed = bus.replay_since(
+        15,
+        backfill=lambda seq: asked.append(seq) or [],
+    )
+
+    assert [stored.seq for stored in replayed] == [16, 17, 18, 19, 20]
+    # No gap, so the store is not consulted at all.
+    assert asked == []

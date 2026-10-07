@@ -17,6 +17,7 @@ from agent_workflow.core.context.tokens import (
     TokenCounter,
 )
 from agent_workflow.core.entities.models.agent_plan import AgentPlan
+from agent_workflow.core.entities.models.todo_list import TodoList
 from agent_workflow.core.entities.models.research_contract import ResearchCoverage
 from agent_workflow.core.entities.models.system_prompt import SYSTEM_PROMPT
 from agent_workflow.core.entities.models.tool_definition import ToolDefinition
@@ -36,6 +37,9 @@ PROVENANCE RULES:
 """
 
 MAX_EXCERPT_CHARS = 4_000
+
+# Per-message overhead counted by _tokens, 16 tokens.
+MESSAGE_OVERHEAD = 16
 
 # Only used when the counter cannot report a ratio.
 _PROSE_CHARS_PER_TOKEN = 4
@@ -88,8 +92,10 @@ class ContextAssembler:
         history_selected: tuple[ContextItem, ...] = (),
         research: ResearchContext | None = None,
         completion_instruction: str | None = None,
+        consolidation_note: str | None = None,
         checkpoint: TaskCheckpoint | None = None,
         execution_plan: AgentPlan | None = None,
+        todo_list: TodoList | None = None,
         tools: tuple[ToolDefinition, ...] = (),
         skill_instructions: str | None = None,
         skill_catalog: str | None = None,
@@ -120,6 +126,7 @@ class ContextAssembler:
             self._render_state(
                 task_state,
                 execution_plan,
+                todo_list,
             )
         )
         execution_message = self._system_message(
@@ -171,6 +178,17 @@ class ContextAssembler:
 
         # The instruction is non-evictable: it is the whole point of
         # the request, so it is budgeted with the fixed blocks.
+        # A one-off nudge to record what was learned. Its own block
+        # rather than an instruction, because "save your notes" is not
+        # an instruction and reusing that slot made the two
+        # indistinguishable to anyone reading a transcript.
+        consolidation_message: dict[str, Any] | None = None
+
+        if consolidation_note is not None:
+            consolidation_message = self._system_message(
+                f"{consolidation_note}"
+            )
+
         instruction_message: dict[str, Any] | None = None
 
         if completion_instruction is not None:
@@ -186,6 +204,10 @@ class ContextAssembler:
             0
             if instruction_message is None
             else self._tokens(instruction_message)
+        ) + (
+            0
+            if consolidation_message is None
+            else self._tokens(consolidation_message)
         )
 
         # Evictable blocks share what is left, capped so the whole
@@ -208,10 +230,17 @@ class ContextAssembler:
         # ------------------------------------------------------
 
         # P1: recent conversation, newest tail, atomic groups.
+        trimmed = False
         conversation = self._select_conversation(
             conversation_recent,
             remaining,
         )
+
+        dropped: list[str] = []
+
+        if len(conversation) < len(conversation_recent):
+            trimmed = True
+            dropped.append("conversation")
 
         if not conversation and conversation_recent:
             # The non-evictable blocks alone can exceed the budget
@@ -232,50 +261,133 @@ class ContextAssembler:
 
         # P2: evidence excerpts, newest first, skipping any single
         # item that cannot fit instead of abandoning the rest.
-        evidence_message = self._select_evidence(
+        evidence_message, evidence_dropped = self._select_evidence(
             evidence_selected,
             max(0, remaining),
         )
+
+        if evidence_dropped:
+            trimmed = True
+            dropped.append("evidence")
 
         if evidence_message is not None:
             remaining -= self._tokens(evidence_message)
 
         # P3: memory with whatever is left.
-        memory_message = self._fit_items(
+        memory_message, memory_trimmed = self._fit_items(
             memory_snapshot,
             max(0, remaining),
         )
+
+        trimmed = trimmed or memory_trimmed
+
+        if memory_trimmed:
+            dropped.append("memory")
 
         if memory_message is not None:
             remaining -= self._tokens(memory_message)
 
         # P4: history with whatever is left.
-        history_message = self._fit_items(
+        history_message, history_trimmed = self._fit_items(
             history_selected,
             max(0, remaining),
         )
+
+        trimmed = trimmed or history_trimmed
+
+        if history_trimmed:
+            dropped.append("history")
+
+        # --------------------------------------------------------------
+        # Emission order is cache order.
+        #
+        # The provider caches the longest unchanged *prefix* of the
+        # request and only recomputes what follows it, so anything
+        # that churns has to come last. Memory, evidence and history
+        # all change during a run; the dialogue mostly grows at its
+        # end, so it is the one large block worth keeping cached.
+        #
+        # Emitting memory before the dialogue meant a single
+        # `remember` call invalidated the whole conversation prefix:
+        # measured at 64% of the request re-sent, and growing with the
+        # length of the dialogue. The conversation now sits directly
+        # after the fixed blocks, so a note costs its own tail and
+        # nothing else.
+        #
+        # The allocation order above is unchanged -- the dialogue
+        # still wins the budget -- because eviction priority and cache
+        # priority are different questions.
+        # --------------------------------------------------------------
+
+        # --------------------------------------------------------------
+        # Dropped-block notice.
+        #
+        # A block that vanished leaves no trace, so the model reads
+        # "nothing was ever said" and re-derives what it was told one
+        # turn ago. Saying what was lost -- and how to ask for it back
+        # -- turns a silent omission into something the model can act
+        # on.
+        #
+        # It is paid for out of the conversation, which is the right
+        # thing to give up first: the notice changes what the model
+        # does next, whereas a trimmed older turn usually does not.
+        # Appending it afterwards, as the obvious version does, pushes
+        # the request over a budget it was just fitted to.
+        # --------------------------------------------------------------
+
+        notice: str | None = None
+
+        if dropped:
+            candidate = self._system_message(
+                _dropped_notice(dropped, memory_snapshot)
+            )
+            notice_cost = self._tokens(candidate)
+
+            if notice_cost <= remaining:
+                reserved = self._select_conversation(
+                    conversation_recent,
+                    max(0, remaining - notice_cost),
+                )
+
+                # Reserving must not cost the whole dialogue. If the
+                # note only fits by leaving the model with nothing,
+                # the note goes instead: the conversation is what it is
+                # there to read, and a warning that everything was
+                # dropped is not worth an empty window.
+                if reserved or not conversation:
+                    conversation = reserved
+                    remaining -= notice_cost
+                    notice = candidate
 
         messages: list[dict[str, Any]] = [
             *fixed,
         ]
 
-        if evidence_message is not None:
-            messages.append(evidence_message)
+        messages.extend(conversation)
 
         if memory_message is not None:
             messages.append(memory_message)
 
-        messages.extend(conversation)
+        if evidence_message is not None:
+            messages.append(evidence_message)
 
         if history_message is not None:
             messages.append(history_message)
 
+        if consolidation_message is not None:
+            messages.append(consolidation_message)
+
         if instruction_message is not None:
             messages.append(instruction_message)
+
+        if notice is not None:
+            messages.append(notice)
 
         return LLMRequestContext(
             messages=tuple(messages),
             tools=tuple(tools),
+            trimmed=trimmed,
+            dropped_blocks=tuple(dropped),
         )
 
     # ==================================================================
@@ -323,6 +435,7 @@ class ContextAssembler:
     def _render_state(
         state: TaskState,
         execution_plan: AgentPlan | None,
+        todo_list: TodoList | None,
     ) -> str:
         contract = state.contract
         # The objective is already authoritative in [TASK ANCHOR];
@@ -374,21 +487,45 @@ class ContextAssembler:
             # grows the request on every iteration.
             shown = _recent_steps(steps)
 
-            for step in shown:
-                lines.append(
-                    f"- [{step.status.value}] "
-                    f"{step.id} ({step.phase.value}): "
-                    f"{step.description}"
-                )
+            # The model's own checklist, when it has one. Preferred over
+            # the plan: it is written by the thing doing the work, in
+            # the terms it chose, and it is what the user is shown.
+            if todo_list is not None and not todo_list.is_empty():
+                lines.append(todo_list.render())
+            else:
+                # Fallback: the plan, in checklist form. A list the
+                # model can tick off is the form it can act against;
+                # the phase name is already carried by the phase
+                # transition, so repeating it here bought nothing.
+                lines.append("▼Todo")
 
-                if step.delegation_hint is not None:
+                for step in shown:
+                    lines.append(
+                        f"{step.status.todo_marker} "
+                        f"{step.description}"
+                    )
+
+            # Delegation hints belong to the plan, not to whichever
+            # checklist happened to render, so they are emitted either
+            # way. Losing them with the model's own list would have
+            # silently withdrawn advice the harness gives on purpose.
+            hinted = [
+                step
+                for step in shown
+                if step.delegation_hint is not None
+            ]
+
+            if hinted:
+                lines.append("delegation hints:")
+
+                for step in hinted:
                     hint = step.delegation_hint
 
                     lines.append(
-                        f"  (delegatable → subagent "
-                        f"role='{hint.role}' "
+                        f"  - {step.description}: delegatable → "
+                        f"subagent role='{hint.role}' "
                         f"power='{hint.power.value}': "
-                        f"{hint.reason})"
+                        f"{hint.reason}"
                     )
 
             hidden = len(steps) - len(shown)
@@ -536,23 +673,29 @@ class ContextAssembler:
         self,
         evidence_selected: tuple[Evidence, ...],
         budget: int,
-    ) -> dict[str, Any] | None:
+    ) -> tuple[dict[str, Any] | None, bool]:
         """Fit as many excerpts as possible, newest first.
 
         An item that does not fit is skipped rather than ending the
         loop: one oversized page must not cost the model every other
         source it collected.
+
+        Returns the message and whether anything was left out, so the
+        report can name evidence as the casualty instead of leaving
+        the reader to guess.
         """
 
         if not evidence_selected or budget <= 0:
-            return None
+            return None, bool(evidence_selected)
 
         remaining = budget
         parts: list[str] = []
+        trimmed = False
 
         for evidence in reversed(evidence_selected):
             if remaining <= 0:
-                break
+                trimmed = True
+                continue
 
             part = self._render_evidence(
                 evidence,
@@ -564,70 +707,82 @@ class ContextAssembler:
             if cost > remaining:
                 # Too big even truncated: skip it and keep trying
                 # the smaller ones.
+                trimmed = True
                 continue
 
             parts.append(part)
             remaining -= cost
 
         if not parts:
-            return None
+            return None, True
 
         parts.reverse()
 
-        return self._system_message(
-            "[EVIDENCE]\n\n" + "\n\n---\n\n".join(parts)
+        return (
+            self._system_message(
+                "[EVIDENCE]\n\n" + "\n\n---\n\n".join(parts)
+            ),
+            trimmed,
         )
 
     def _fit_items(
         self,
         items: tuple[ContextItem, ...],
         budget: int,
-    ) -> dict[str, Any] | None:
+    ) -> tuple[dict[str, Any] | None, bool]:
         """Fit as many items as possible, keeping the newest.
 
         Previously the whole selection was dropped when it did not
         fit, so a single large memory entry silently cost the model
         every other entry as well.
+
+        Returns the message and whether anything was dropped or
+        truncated to make it fit.
         """
 
         if not items or budget <= 0:
-            return None
+            return None, bool(items)
 
         kept: list[str] = []
-        used = 16
+        used = MESSAGE_OVERHEAD
         remaining = budget
+        trimmed = False
 
         for item in reversed(items):
             if remaining <= 0:
+                trimmed = True
                 break
 
-            text = item.to_text()
+            original = item.to_text()
+            text = original
             cost = self.counter.count(text)
 
             if cost > remaining:
                 allowance = self._chars_for(remaining)
 
                 if allowance <= len(TRUNCATION_MARKER):
+                    trimmed = True
                     continue
 
-                text = (
-                    text[:allowance] + TRUNCATION_MARKER
-                )
+                text = original[:allowance] + TRUNCATION_MARKER
                 cost = self.counter.count(text)
 
                 if cost > remaining:
+                    trimmed = True
                     continue
+
+                trimmed = True
 
             kept.append(text)
             used += cost
             remaining -= cost
 
         if not kept:
-            return None
+            return None, True
 
         kept.reverse()
 
-        return self._system_message("\n\n".join(kept))
+        return self._system_message("\n\n".join(kept)), trimmed
 
     def _fit_message(
         self,
@@ -751,13 +906,17 @@ class ContextAssembler:
             used += cost
 
         if kept:
-            # Defensive: never start with an orphan tool result.
+            # Defensive: never start with an orphan tool result. A
+            # leading tool result with no parent assistant turn is
+            # rejected by the provider, so dropping it is right, not a
+            # loss: the window opens on tool output when a resumed
+            # transcript starts mid-turn.
             while kept and kept[0].get("role") == "tool":
                 kept.pop(0)
 
             return kept
 
-        # Nothing fits whole: keep the newest usable message,
+        # Nothing usable whole: keep the newest usable message,
         # truncated and visibly marked.
         for group in reversed(groups):
             for message in reversed(group):
@@ -791,3 +950,51 @@ def _recent_steps(steps: list[Any]) -> list[Any]:
             tail.insert(0, step)
 
     return tail
+
+
+# Tells the model what did not make it into the request, and how to
+# get it. Without this a dropped block is indistinguishable from one
+# that never existed.
+_DROPPED_PHRASES = {
+    "memory": (
+        "notes written earlier in this session did not fit and were "
+        "left out of this request"
+    ),
+    "evidence": (
+        "collected page excerpts did not fit and were left out"
+    ),
+    "history": (
+        "earlier progress did not fit and was left out"
+    ),
+    "conversation": (
+        "the earlier part of this conversation did not fit"
+    ),
+}
+
+
+def _dropped_notice(
+    dropped: list[str],
+    memory_snapshot: tuple[ContextItem, ...],
+) -> str:
+    """A short, actionable note about what was left out.
+
+    Memory gets a pointer at recall_matching rather than just a
+    mention, because knowing a note was dropped is only useful if
+    there is a way to retrieve it.
+    """
+
+    lines = ["[NOT IN THIS REQUEST]"]
+
+    for name in dropped:
+        phrase = _DROPPED_PHRASES.get(name)
+
+        if phrase is not None:
+            lines.append(f"- {phrase}")
+
+    if "memory" in dropped and memory_snapshot:
+        lines.append(
+            "- Call recall_matching with a topic to read them again "
+            "rather than working them out a second time."
+        )
+
+    return "\n".join(lines)

@@ -7,6 +7,7 @@ from dataclasses import replace
 from typing import Protocol
 
 from agent_workflow.core.entities.models.agent import Agent, EventCallback
+from agent_workflow.core.entities.models.event_sink import emit_to
 from agent_workflow.core.entities.models.agent_trace import AgentEvent, ToolStarted
 from agent_workflow.core.entities.models.model_router import ModelRouter
 from agent_workflow.core.entities.models.subagent import (
@@ -202,7 +203,7 @@ class SubagentManager:
                 tool_calls += 1
 
             if on_event is not None:
-                await on_event(event)
+                await emit_to(on_event, event)
 
         timeout = effective_task.timeout_seconds
 

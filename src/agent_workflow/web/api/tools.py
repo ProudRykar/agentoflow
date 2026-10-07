@@ -4,7 +4,16 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 
+import logging
+
 from agent_workflow.core.application.session import SessionManager
+from agent_workflow.core.application.settings_service import (
+    CONFIG_FILE,
+    SettingsService,
+)
+from agent_workflow.core.infrastructure.paths import (
+    AgentWorkflowPaths,
+)
 from agent_workflow.core.entities.models.tool_definition_builder import (
     ToolDefinitionBuilder,
 )
@@ -15,8 +24,13 @@ from agent_workflow.web.schemas import (
     ToolParameter,
     ToolsResponse,
     ToolsSummary,
+    ToolToggleResponse,
+    ToolToggleWrite,
     ToolUsageStats,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter()
@@ -94,6 +108,15 @@ async def list_tools(
         | session.context.approved_permissions
     )
 
+    toggle = session.runtime.tool_toggle
+
+    if toggle is not None:
+        toggle.observe()
+
+    disabled = (
+        toggle.disabled_names() if toggle is not None else ()
+    )
+
     tools: list[ToolInfo] = []
 
     for tool in registry.all():
@@ -134,13 +157,85 @@ async def list_tools(
 
     tools.sort(key=lambda info: info.name)
 
+    if toggle is not None:
+        # A disabled tool is absent from the registry, so it has to
+        # be listed from what the session still retains. Without
+        # this there would be no way to switch one back on from the
+        # UI.
+        visible = {tool.name for tool in registry.all()}
+
+        for name in disabled:
+            if name in visible:
+                continue
+
+            hidden = toggle.known_tools_by_name().get(name)
+
+            if hidden is None:
+                continue
+
+            definition = builder.build(hidden)
+
+            tools.append(
+                ToolInfo(
+                    name=hidden.name,
+                    description=definition.description,
+                    source=_source_of(
+                        hidden.name,
+                        mcp,
+                        plugin_of,
+                    ),
+                    enabled=False,
+                    permissions=sorted(
+                        hidden.policy.permissions
+                    ),
+                    missing_permissions=sorted(
+                        hidden.policy.permissions - permissions
+                    ),
+                    requires_approval=(
+                        hidden.policy.requires_approval
+                    ),
+                    timeout=hidden.policy.timeout,
+                    max_output_size=(
+                        hidden.policy.max_output_size
+                    ),
+                    parameters=_parameters(
+                        definition.input_schema
+                    ),
+                    required_parameters=_required(
+                        definition.input_schema
+                    ),
+                    mcp_server=plugin_of.get(hidden.name),
+                )
+            )
+
+        tools.sort(key=lambda item: item.name)
+
     return ToolsResponse(
         tools=tools,
+        # Only what the model may actually call. A disabled tool is
+        # listed for the operator but is not registered.
+        disabled=list(disabled),
         summary=ToolsSummary(
-            registered_tools=len(tools),
+            registered_tools=sum(
+                1 for item in tools if item.enabled
+            ),
             **stats.summary(),  # type: ignore[arg-type]
         ),
     )
+
+
+def _source_of(
+    name: str,
+    mcp: Any,
+    plugin_of: dict[str, str],
+) -> str:
+    if mcp is not None and mcp.owns(name):
+        return "mcp"
+
+    if name in plugin_of:
+        return "plugin"
+
+    return "builtin"
 
 
 def _parameters(
@@ -204,6 +299,129 @@ def _stats(usage: Any) -> ToolUsageStats:
 # ======================================================================
 # Historical statistics
 # ======================================================================
+
+
+@router.post(
+    "/{session_id}/tools/{name}",
+    response_model=ToolToggleResponse,
+)
+async def set_tool_enabled(
+    session_id: str,
+    name: str,
+    payload: ToolToggleWrite,
+    request: Request,
+) -> ToolToggleResponse:
+    """Switch one tool off or on for this and future sessions.
+
+    Disabling removes the tool from the live registry, so the model
+    cannot call it for the rest of the run. The choice is written to
+    ``[tools] disabled`` so it survives a restart.
+    """
+
+    session = await _session(request, session_id)
+
+    toggle = session.runtime.tool_toggle
+
+    if toggle is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This session has no tool toggle; it was built "
+                "without one."
+            ),
+        )
+
+    if payload.enabled:
+        known = toggle.enable(name)
+    else:
+        known = toggle.disable(name)
+
+    if not known:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Unknown tool '{name}'",
+        )
+
+    session.refresh_permissions()
+
+    _persist_toggle(request, toggle)
+
+    return ToolToggleResponse(
+        session_id=session_id,
+        tool=name,
+        enabled=payload.enabled,
+        known=True,
+        disabled=list(toggle.disabled_names()),
+        visible_tools=len(session.agent.registry.all()),
+    )
+
+
+def _settings_of(request: Request) -> SettingsService:
+    """The app's settings service, cached on app state."""
+
+    cached = getattr(
+        request.app.state,
+        "settings_service",
+        None,
+    )
+
+    if isinstance(cached, SettingsService):
+        return cached
+
+    service = SettingsService(AgentWorkflowPaths())
+
+    request.app.state.settings_service = service
+
+    return service
+
+
+def _persist_toggle(
+    request: Request,
+    toggle: Any,
+) -> None:
+    """Write the current disabled set back to config.toml.
+
+    Best effort: the in-memory switch has already happened, so a
+    settings failure must not fail the request. Losing persistence is
+    reported through the settings service's own error path rather
+    than being swallowed silently.
+    """
+
+    try:
+        service = _settings_of(request)
+    except Exception:
+        logger.warning(
+            "Tool toggle applied but the settings service is "
+            "unavailable, so the change was not persisted",
+            exc_info=True,
+        )
+        return
+
+    try:
+        document = service.read(CONFIG_FILE)
+    except Exception:
+        logger.warning(
+            "Could not read %s to persist the tool toggle",
+            CONFIG_FILE,
+            exc_info=True,
+        )
+        return
+
+    data = dict(document.data)
+    tools = dict(data.get("tools") or {})
+
+    tools["disabled"] = list(toggle.disabled_names())
+
+    data["tools"] = tools
+
+    try:
+        service.write(CONFIG_FILE, data)
+    except Exception:
+        logger.warning(
+            "Could not persist the tool toggle to %s",
+            CONFIG_FILE,
+            exc_info=True,
+        )
 
 
 @router.get("/history/aggregate", response_model=GlobalStatsResponse)

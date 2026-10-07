@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { SessionInfo } from '../../api/types'
+import type { Theme } from '../../theme'
 
 interface SessionSidebarProps {
   sessions: SessionInfo[]
@@ -15,6 +16,8 @@ interface SessionSidebarProps {
   onToggle: () => void
   onView: (view: 'chat' | 'tools') => void
   onOpenSettings: () => void
+  theme: Theme
+  onToggleTheme: () => void
 }
 
 function relativeTime(seconds: number): string {
@@ -49,6 +52,8 @@ export function SessionSidebar({
   onToggle,
   onView,
   onOpenSettings,
+  theme,
+  onToggleTheme,
 }: SessionSidebarProps) {
   const [editingId, setEditingId] = useState<string | null>(
     null,
@@ -126,6 +131,17 @@ export function SessionSidebar({
           aria-label="New session"
         >
           +
+        </button>
+
+        <button
+          type="button"
+          className="rail-icon"
+          onClick={onToggleTheme}
+          title={theme === 'dark' ? 'Light theme' : 'Dark theme'}
+          aria-label={theme === 'dark' ? 'Light theme' : 'Dark theme'}
+          aria-pressed={theme === 'light'}
+        >
+          {theme === 'dark' ? '\u2600' : '\u263d'}
         </button>
 
         <div className="rail-spacer" />

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from agent_workflow.core.entities.models.todo_list import TodoList
 from agent_workflow.core.context.evidence import (
     EvidenceReceipt,
     EvidenceStore,
@@ -286,6 +287,10 @@ class AgentOrchestrator:
         # Survives run resets; page bodies live here, never in
         # the conversation.
         self._evidence_store = EvidenceStore()
+        # The model's own checklist. Separate from the plan: the plan
+        # is phase-shaped and machine-checkable, this is what the agent
+        # says it is doing.
+        self._todo_list = TodoList()
 
         # Immutable source of truth for WHAT the user asked.
         # Created once per task, never mutated afterwards.
@@ -346,6 +351,10 @@ class AgentOrchestrator:
     @property
     def evidence_store(self) -> EvidenceStore:
         return self._evidence_store
+
+    @property
+    def todo_list(self) -> TodoList:
+        return self._todo_list
 
     def restore_working_state(
         self,
@@ -792,6 +801,11 @@ class AgentOrchestrator:
         )
 
         self._activate_first_pending_step()
+
+        # The planner's phases become the model's starting checklist, in
+        # the model's vocabulary. A floor, not the answer: the model
+        # overwrites it the moment it knows better.
+        self._todo_list.seed(self._plan.steps)
 
         return self._plan
 

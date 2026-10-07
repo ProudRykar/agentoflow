@@ -3,7 +3,6 @@ from typing import Any
 
 import pytest
 
-from agent_workflow.core.entities.models.arguments import ArgumentDecoder
 from agent_workflow.core.entities.models.builtin.read_file import ReadFileInput
 from agent_workflow.core.entities.models.tool import Tool, ToolContext, ToolPolicy
 from agent_workflow.core.entities.models.tool_executor import ToolExecutor
@@ -149,9 +148,16 @@ async def test_output_limit(context: ToolContext) -> None:
         context=context,
     )
 
-    assert result.output is None
-    assert result.error is not None
-    assert result.error.code == "output_too_large"
+    # Over-long output is cut, not refused.
+    #
+    # Refusing it turned a legitimate 25k-character answer into an
+    # error, so the model got nothing and had to re-run the call with
+    # narrower filters to obtain a fragment it could have been handed
+    # straight away.
+    assert result.error is None
+    assert result.output is not None
+    assert len(result.output) <= 100
+    assert "[TRUNCATED" in result.output
 
 
 @pytest.mark.asyncio

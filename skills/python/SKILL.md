@@ -13,8 +13,8 @@ Write, run, and debug Python tests using pytest and related tools.
 
 ## Workflow
 
-1. Use `filesystem.read` to examine existing test files.
-2. Use `filesystem.search_files` to find test patterns.
+1. Use `read_file` to examine existing test files.
+2. Use `search_files` to find test patterns.
 3. Write tests following project conventions (pytest, unittest).
 4. Use `execute_shell` to run tests with `pytest`.
 5. Analyze test output and fix failures.
@@ -30,8 +30,8 @@ Write, run, and debug Python tests using pytest and related tools.
 
 ## Tools
 
-- `filesystem.read` - Read test files
-- `filesystem.write_file` - Write test files
-- `filesystem.edit_file` - Modify test files
+- `read_file` - Read test files
+- `write_file` - Write test files
+- `edit_file` - Modify test files
 - `execute_shell` - Run pytest
-- `filesystem.search_files` - Find test patterns
+- `search_files` - Find test patterns

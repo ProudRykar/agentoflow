@@ -75,6 +75,7 @@ class SessionStateStore:
         checkpoint: TaskCheckpoint | None = None,
         task_state: TaskState | None = None,
         evidence: EvidenceStore | None = None,
+        preloaded_skills: tuple[str, ...] | None = None,
     ) -> None:
         """Write the working state, merging with what is stored.
 
@@ -95,6 +96,12 @@ class SessionStateStore:
 
         if evidence is not None:
             payload["evidence"] = evidence.to_dict()
+
+        # An empty tuple is meaningful here: it is how a preload is
+        # cleared, so it must be written rather than skipped the way a
+        # None argument is.
+        if preloaded_skills is not None:
+            payload["preloaded_skills"] = list(preloaded_skills)
 
         with self._connect() as connection:
             connection.execute(
@@ -165,6 +172,28 @@ class SessionStateStore:
         store.trim_to(MAX_RESTORED_EVIDENCE)
 
         return store
+
+    def preloaded_skills(
+        self,
+        session_id: str,
+    ) -> tuple[str, ...]:
+        """Skills the reader asked to have active from the first message.
+
+        Surviving a reload matters: a preload exists precisely so the
+        agent does not have to decide to load it, and that has to still
+        be true in the next session on the same conversation.
+        """
+
+        stored = self.load(session_id).get("preloaded_skills")
+
+        if not isinstance(stored, list):
+            return ()
+
+        return tuple(
+            str(name)
+            for name in stored
+            if isinstance(name, str) and name
+        )
 
     def forget(self, session_id: str) -> None:
         """Drop a deleted session's working state."""

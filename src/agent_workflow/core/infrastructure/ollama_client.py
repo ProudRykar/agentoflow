@@ -9,7 +9,11 @@ from typing import Any
 
 import httpx
 
-from agent_workflow.core.entities.models.llm import LLMResponse, LLMToolCall
+from agent_workflow.core.entities.models.llm import (
+    LLMResponse,
+    LLMToolCall,
+    extract_usage,
+)
 from agent_workflow.core.entities.models.llm_client import LLMClient
 from agent_workflow.core.entities.models.tool_definition import ToolDefinition
 
@@ -85,6 +89,58 @@ class OllamaClient(LLMClient):
     def options(self) -> OllamaOptions:
         return self._options
 
+    async def model_context_length(
+        self,
+        model: str | None = None,
+    ) -> int | None:
+        """The model's real context window, as the server reports it.
+
+        The catalog is a human-written file and goes stale: a model is
+        replaced, retagged, or pulled at a different quantisation whose
+        window differs. ``num_ctx`` is set from the catalog, so a value
+        that is too small quietly leaves capacity unused, and one that
+        is too large produces a request the server truncates.
+
+        Returns None when the model is not pulled or the server does
+        not say, which leaves the catalog in charge rather than
+        guessing.
+        """
+
+        target = model or self._model
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(10.0),
+                trust_env=False,
+            ) as client:
+                response = await client.post(
+                    f"{self._base_url}/api/show",
+                    json={"model": target},
+                )
+        except httpx.HTTPError:
+            return None
+
+        if response.status_code >= 400:
+            return None
+
+        try:
+            payload = response.json()
+        except ValueError:
+            return None
+
+        info = payload.get("model_info")
+
+        if not isinstance(info, dict):
+            return None
+
+        for key, value in info.items():
+            if key.endswith(".context_length") and isinstance(
+                value, int
+            ):
+                return value
+
+        return None
+
     async def chat(
         self,
         messages: list[dict[str, Any]],
@@ -130,6 +186,7 @@ class OllamaClient(LLMClient):
             thinking=message.get("thinking"),
             tool_calls=tool_calls,
             raw=data,
+            usage=extract_usage(data),
         )
 
     async def chat_stream(

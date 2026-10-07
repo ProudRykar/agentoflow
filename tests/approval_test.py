@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -351,3 +352,367 @@ async def test_approval_is_independent_of_transport() -> None:
         isinstance(event, ApprovalRequested)
         for event in events
     )
+
+
+# ======================================================================
+# A granted permission must stop being asked again
+# ======================================================================
+
+
+def _mcp_hook(remember: bool = True):
+    """A hook over one tool that declares requires_approval.
+
+    Mirrors an MCP tool: its declared permission is already held, so
+    the only thing left to approve is the synthetic per-tool grant.
+    """
+
+    from agent_workflow.core.entities.models.approval_hook import (
+        ApprovalHook,
+    )
+    from agent_workflow.core.entities.models.path_policy import (
+        PathPolicy,
+    )
+    from agent_workflow.core.entities.models.shell_policy import (
+        ShellPolicy,
+    )
+    from agent_workflow.core.entities.models.tool import (
+        Tool,
+        ToolContext,
+        ToolPolicy,
+    )
+    from agent_workflow.core.entities.models.tool_registry import (
+        ToolRegistry,
+    )
+
+    async def handler(arguments, context):
+        del arguments, context
+
+        return "ok"
+
+    registry = ToolRegistry()
+
+    registry.register(
+        Tool(
+            name="mcp_stash_update_tag_description",
+            description="Update a tag description.",
+            input_type=None,
+            handler=handler,
+            policy=ToolPolicy(
+                permissions=frozenset({"mcp.execute"}),
+                requires_approval=True,
+                timeout=5.0,
+                max_output_size=1_000,
+            ),
+        )
+    )
+
+    controller = ApprovalController()
+
+    hook = ApprovalHook(
+        handler=controller,
+        shell_policy=ShellPolicy(
+            path_policy=PathPolicy(
+                allowed_paths=(Path.cwd(),),
+            ),
+        ),
+        registry=registry,
+        remember_approvals=remember,
+    )
+
+    context = ToolContext(
+        working_directory=Path.cwd(),
+        environment={},
+        allowed_path=(Path.cwd(),),
+        permissions=frozenset({"mcp.execute"}),
+    )
+
+    return hook, controller, context
+
+
+async def _call(hook, context, name: str) -> None:
+    from agent_workflow.core.entities.models.llm import LLMToolCall
+
+    await hook.before_tool(
+        iteration=1,
+        tool_call=LLMToolCall(id="c1", name=name, arguments={}),
+        context=context,
+    )
+
+
+async def test_bulk_work_asks_once_not_once_per_item() -> None:
+    """The reason this matters: ten tags used to mean ten prompts.
+
+    Approving once and then being asked again trains the operator to
+    click allow without reading, which is worse than asking once.
+    """
+
+    from agent_workflow.core.entities.models.approval_hook import (
+        ApprovalHook,
+    )
+    from agent_workflow.core.entities.models.path_policy import (
+        PathPolicy,
+    )
+    from agent_workflow.core.entities.models.shell_policy import (
+        ShellPolicy,
+    )
+    from agent_workflow.core.entities.models.tool import (
+        Tool,
+        ToolContext,
+        ToolPolicy,
+    )
+    from agent_workflow.core.entities.models.tool_registry import (
+        ToolRegistry,
+    )
+
+    asked: list[str] = []
+
+    async def counting_handler(request):
+        asked.append(request.permission)
+
+        return True
+
+    async def noop(arguments, context):
+        del arguments, context
+
+        return "ok"
+
+    registry = ToolRegistry()
+
+    registry.register(
+        Tool(
+            name="mcp_stash_update_tag_description",
+            description="d",
+            input_type=None,
+            handler=noop,
+            policy=ToolPolicy(
+                permissions=frozenset({"mcp.execute"}),
+                requires_approval=True,
+                timeout=5.0,
+                max_output_size=1_000,
+            ),
+        )
+    )
+
+    hook = ApprovalHook(
+        handler=counting_handler,
+        shell_policy=ShellPolicy(
+            path_policy=PathPolicy(allowed_paths=(Path.cwd(),)),
+        ),
+        registry=registry,
+    )
+
+    context = ToolContext(
+        working_directory=Path.cwd(),
+        environment={},
+        allowed_path=(Path.cwd(),),
+        permissions=frozenset({"mcp.execute"}),
+    )
+
+    for index in range(10):
+        await _call(hook, context, "mcp_stash_update_tag_description")
+
+    assert len(asked) == 1
+    assert asked[0] == "tool:mcp_stash_update_tag_description"
+
+
+async def test_a_granted_permission_is_recorded_and_honoured() -> None:
+    hook, controller, context = _mcp_hook()
+
+    task = asyncio.create_task(
+        _call(hook, context, "mcp_stash_update_tag_description")
+    )
+
+    await asyncio.sleep(0.01)
+    controller.allow()
+    await task
+
+    assert (
+        "tool:mcp_stash_update_tag_description"
+        in context.approved_permissions
+    )
+
+    # The second call must not open a prompt at all.
+    await _call(hook, context, "mcp_stash_update_tag_description")
+
+    assert controller.active is False
+
+
+async def test_remembering_is_per_tool() -> None:
+    from agent_workflow.core.entities.models.approval_hook import (
+        ApprovalHook,
+    )
+    from agent_workflow.core.entities.models.path_policy import (
+        PathPolicy,
+    )
+    from agent_workflow.core.entities.models.shell_policy import (
+        ShellPolicy,
+    )
+    from agent_workflow.core.entities.models.tool import (
+        Tool,
+        ToolContext,
+        ToolPolicy,
+    )
+    from agent_workflow.core.entities.models.tool_registry import (
+        ToolRegistry,
+    )
+
+    async def handler(arguments, context):
+        del arguments, context
+
+        return "ok"
+
+    registry = ToolRegistry()
+
+    for name in ("tool_a", "tool_b"):
+        registry.register(
+            Tool(
+                name=name,
+                description="d",
+                input_type=None,
+                handler=handler,
+                policy=ToolPolicy(
+                    permissions=frozenset({"mcp.execute"}),
+                    requires_approval=True,
+                    timeout=5.0,
+                    max_output_size=1_000,
+                ),
+            )
+        )
+
+    controller = ApprovalController()
+
+    hook = ApprovalHook(
+        handler=controller,
+        shell_policy=ShellPolicy(
+            path_policy=PathPolicy(allowed_paths=(Path.cwd(),)),
+        ),
+        registry=registry,
+    )
+
+    context = ToolContext(
+        working_directory=Path.cwd(),
+        environment={},
+        allowed_path=(Path.cwd(),),
+        permissions=frozenset({"mcp.execute"}),
+    )
+
+    task = asyncio.create_task(_call(hook, context, "tool_a"))
+
+    await asyncio.sleep(0.01)
+    controller.allow()
+    await task
+
+    # A different tool is a different grant and must still ask.
+    other = asyncio.create_task(_call(hook, context, "tool_b"))
+
+    await asyncio.sleep(0.01)
+
+    assert controller.active is True
+    assert controller.request.tool_name == "tool_b"
+
+    controller.deny()
+
+    with pytest.raises(ApprovalDeniedError):
+        await other
+
+
+async def test_remembering_can_be_switched_off() -> None:
+    """An operator who wants every single call prompted keeps that."""
+
+    from agent_workflow.core.entities.models.approval_hook import (
+        ApprovalHook,
+    )
+    from agent_workflow.core.entities.models.path_policy import (
+        PathPolicy,
+    )
+    from agent_workflow.core.entities.models.shell_policy import (
+        ShellPolicy,
+    )
+    from agent_workflow.core.entities.models.tool import (
+        Tool,
+        ToolContext,
+        ToolPolicy,
+    )
+    from agent_workflow.core.entities.models.tool_registry import (
+        ToolRegistry,
+    )
+
+    asked: list[str] = []
+
+    async def counting_handler(request):
+        asked.append(request.permission)
+
+        return True
+
+    async def noop(arguments, context):
+        del arguments, context
+
+        return "ok"
+
+    registry = ToolRegistry()
+
+    registry.register(
+        Tool(
+            name="mcp_stash_update_tag_description",
+            description="d",
+            input_type=None,
+            handler=noop,
+            policy=ToolPolicy(
+                permissions=frozenset({"mcp.execute"}),
+                requires_approval=True,
+                timeout=5.0,
+                max_output_size=1_000,
+            ),
+        )
+    )
+
+    hook = ApprovalHook(
+        handler=counting_handler,
+        shell_policy=ShellPolicy(
+            path_policy=PathPolicy(allowed_paths=(Path.cwd(),)),
+        ),
+        registry=registry,
+        remember_approvals=False,
+    )
+
+    context = ToolContext(
+        working_directory=Path.cwd(),
+        environment={},
+        allowed_path=(Path.cwd(),),
+        permissions=frozenset({"mcp.execute"}),
+    )
+
+    for _ in range(3):
+        await _call(hook, context, "mcp_stash_update_tag_description")
+
+    assert len(asked) == 3
+
+
+async def test_a_denial_does_not_unlock_the_tool() -> None:
+    hook, controller, context = _mcp_hook()
+
+    task = asyncio.create_task(
+        _call(hook, context, "mcp_stash_update_tag_description")
+    )
+
+    await asyncio.sleep(0.01)
+    controller.deny()
+
+    with pytest.raises(ApprovalDeniedError):
+        await task
+
+    assert context.approved_permissions == frozenset()
+
+    # The next call must ask again.
+    second = asyncio.create_task(
+        _call(hook, context, "mcp_stash_update_tag_description")
+    )
+
+    await asyncio.sleep(0.01)
+
+    assert controller.active is True
+
+    controller.deny()
+
+    with pytest.raises(ApprovalDeniedError):
+        await second

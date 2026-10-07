@@ -87,6 +87,57 @@ class ContextManager:
 
         return list(self._messages)
 
+    def has_trailing_assistant(self) -> bool:
+        """Whether an assistant turn is there to be replaced.
+
+        Deliberately non-mutating. The caller needs to refuse a
+        regenerate *before* anything is dropped, and asking by
+        dropping would take the conversation with it -- the second call
+        would then find nothing and the user's own message would be
+        gone.
+        """
+
+        if not self._messages:
+            return False
+
+        return self._messages[-1].get("role") in ("assistant", "tool")
+
+    def drop_trailing_assistant(self) -> int:
+        """Remove the assistant's last answer so it can be produced again.
+
+        Returns how many messages went.
+
+        Only trailing assistant and tool messages are removed, back to
+        and including the assistant turn that made the tool calls. A
+        tool result without the call that produced it is invalid to
+        the provider, so it has to go with the call; stopping at the
+        assistant turn and leaving orphaned results behind produces a
+        request that is rejected outright.
+
+        Zero is returned when there is nothing of the assistant's own
+        to redo, which is the case when the last thing said was the
+        user's.
+        """
+
+        cutoff = len(self._messages)
+
+        while cutoff > 0:
+            role = self._messages[cutoff - 1].get("role")
+
+            if role in ("assistant", "tool"):
+                cutoff -= 1
+                continue
+
+            break
+
+        if cutoff == len(self._messages):
+            return 0
+
+        dropped = self._messages[cutoff:]
+        self._messages = self._messages[:cutoff]
+
+        return len(dropped)
+
     def _trim(self) -> None:
         max_messages = self._policy.max_messages
 

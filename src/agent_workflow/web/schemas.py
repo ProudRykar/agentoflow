@@ -55,6 +55,17 @@ class RunRequest(BaseModel):
     prompt: str = Field(min_length=1)
 
 
+class RegenerateRequest(BaseModel):
+    """Ask for the last answer again.
+
+    The hint is optional and defaults to empty: a plain "try again"
+    is a real request, and forcing the caller to invent wording for
+    it would just push them into resending the same question.
+    """
+
+    hint: str = ""
+
+
 class RunResponse(BaseModel):
     session_id: str
     status: str
@@ -95,6 +106,13 @@ class SkillInfo(BaseModel):
     active: bool = False
     loaded: bool = False
     used: bool = False
+    preloaded: bool = False
+
+
+class SkillPreloadRequest(BaseModel):
+    """The skills to have active from the next message."""
+
+    skills: list[str] = []
 
 
 class PluginInfo(BaseModel):
@@ -144,6 +162,7 @@ class ToolInfo(BaseModel):
     name: str
     description: str
     source: str
+    enabled: bool = True
     permissions: list[str] = Field(default_factory=list)
     missing_permissions: list[str] = Field(default_factory=list)
     requires_approval: bool = False
@@ -171,6 +190,24 @@ class ToolsSummary(BaseModel):
 class ToolsResponse(BaseModel):
     tools: list[ToolInfo] = Field(default_factory=list)
     summary: ToolsSummary = Field(default_factory=ToolsSummary)
+    # Names the operator has switched off. Kept separately from
+    # `tools` so a disabled tool can be switched back on.
+    disabled: list[str] = Field(default_factory=list)
+
+
+class ToolToggleWrite(BaseModel):
+    enabled: bool
+
+
+class ToolToggleResponse(BaseModel):
+    session_id: str
+    tool: str
+    enabled: bool
+    # False when the name is not a tool this session knows, which the
+    # UI shows rather than pretending the change worked.
+    known: bool = True
+    disabled: list[str] = Field(default_factory=list)
+    visible_tools: int = 0
 
 
 # ======================================================================

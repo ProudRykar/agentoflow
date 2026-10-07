@@ -27,7 +27,13 @@ from agent_workflow.core.entities.models.subagent import (
     SubagentTask,
     TaskProfile,
 )
-from agent_workflow.core.entities.models.subagent_manager import SubagentManager
+from agent_workflow.core.entities.models.subagent_manager import (
+    SubagentManager,
+)
+from agent_workflow.core.entities.models.builtin.subagent import (
+    SubagentRunInput,
+)
+
 from agent_workflow.core.entities.models.tool import ToolContext
 from agent_workflow.core.entities.models.tool_executor import ToolExecutor
 from agent_workflow.core.entities.models.tool_registry import ToolRegistry
@@ -354,3 +360,95 @@ def test_factory_builds_isolated_agent() -> None:
     assert agent.model == "e2b"
     assert agent.role == "researcher"
     assert agent.run_id == "run-1"
+
+
+# ======================================================================
+# The delegation prompt must be attributable to a run
+# ======================================================================
+
+
+async def test_the_parent_run_id_is_never_empty() -> None:
+    """A user turn carries no run id, so this field is the only signal.
+
+    The transcript decides whether a prompt belongs to a subagent from
+    it. Empty means the delegation prompt renders as though the user
+    had typed it, which is the duplicate this guards against.
+    """
+
+    from agent_workflow.core.entities.models.builtin import (
+        subagent as subagent_tool,
+    )
+    from agent_workflow.core.entities.models.tool import ToolContext
+
+    captured: dict[str, str] = {}
+
+    class _Result:
+        # The real enum, so the tool takes the success branch.
+        status = SubagentStatus.COMPLETED
+        output = "done"
+        error = None
+
+    class _Manager:
+        async def run(self, task, *, parent_run_id, parent_context,
+                      on_event=None):
+            captured["parent_run_id"] = parent_run_id
+
+            return _Result()
+
+    tool = subagent_tool.create_subagent_tool(_Manager())  # type: ignore[arg-type]
+
+    arguments = SubagentRunInput(
+        role="writer", objective="write it"
+    )
+
+    # The default ToolContext carries an empty run id.
+    await tool.handler(
+        arguments,
+        ToolContext(
+            working_directory=None,  # type: ignore[arg-type]
+            environment={},
+            allowed_path=(),
+            permissions=frozenset(),
+        ),
+    )
+
+    assert captured["parent_run_id"] == "main"
+
+
+async def test_a_real_run_id_is_passed_through() -> None:
+    from agent_workflow.core.entities.models.builtin import (
+        subagent as subagent_tool,
+    )
+    from agent_workflow.core.entities.models.tool import ToolContext
+
+    captured: dict[str, str] = {}
+
+    class _Result:
+        # The real enum, so the tool takes the success branch.
+        status = SubagentStatus.COMPLETED
+        output = "done"
+        error = None
+
+    class _Manager:
+        async def run(self, task, *, parent_run_id, parent_context,
+                      on_event=None):
+            captured["parent_run_id"] = parent_run_id
+
+            return _Result()
+
+    tool = subagent_tool.create_subagent_tool(_Manager())  # type: ignore[arg-type]
+
+    await tool.handler(
+        SubagentRunInput(
+            role="writer", objective="write it"
+        ),
+        ToolContext(
+            working_directory=None,  # type: ignore[arg-type]
+            environment={},
+            allowed_path=(),
+            permissions=frozenset(),
+            run_id="run-parent",
+        ),
+    )
+
+    assert captured["parent_run_id"] == "run-parent"

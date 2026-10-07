@@ -12,7 +12,91 @@
   --warn: #c0a86e;
   --danger: #c27c72;
 
+  /*
+   * Semantic surfaces. These exist because a dark tint of the page
+   * background is unreadable on a light one, and because the state
+   * colours are used as a background in several places. Dark values
+   * here, light values under [data-theme='light'].
+   */
+  --surface-ok: #2f4a36;
+  --surface-ok-border: #2f4a36;
+  --surface-warn: #221d14;
+  --surface-danger: #2a1c1a;
+  --surface-info: #31506e;
+  --surface-approve: #4a5c3a;
+  --surface-thinking: #2b4032;
+  --surface-subagent: #3f6180;
+  --on-info: #7d9cc0;
+  --on-info-dim: #8aa8ce;
+  --on-approve: #a8b899;
+  --on-warn: #ae9864;
+  --on-ok: #709278;
+
+  /* Syntax token colours, dark palette. */
+  --tok-keyword: #b48ce8;
+  --tok-string: #7fc99a;
+  --tok-number: #e0a35c;
+  --tok-comment: #7f8f85;
+  --tok-function: #6bb6e8;
+  --tok-constant: #e08ab0;
+  --tok-property: #d7c07a;
+  --tok-operator: #9aa4b2;
+  --tok-added: #7fc99a;
+  --tok-removed: #e08a8a;
+
+  /* Overlay used for the table scroll shadow. */
+  --scroll-shadow: rgba(0, 0, 0, 0.28);
+
   color-scheme: dark;
+}
+
+/*
+ * Light theme. The app was dark-only until now, so the token colours
+ * were picked against #090d0b and cannot simply be inverted: each
+ * one is dark enough to pass AA on white.
+ */
+:root[data-theme='light'] {
+  --bg: #f7f9f7;
+  --bg-raised: #ffffff;
+  --bg-inset: #eef2ee;
+  --border: #d7e0d9;
+  --border-strong: #b8c8bc;
+  --text: #1c2620;
+  --text-dim: #5c6c62;
+  --accent: #2f7a45;
+  --accent-soft: #27693a;
+  --info: #2c5c8f;
+  --warn: #8a6a1f;
+  --danger: #a33c31;
+
+  --surface-ok: #e2f0e5;
+  --surface-ok-border: #b6d6bd;
+  --surface-warn: #fbf1dc;
+  --surface-danger: #fbe6e3;
+  --surface-info: #e4edf6;
+  --surface-approve: #eef3e2;
+  --surface-thinking: #e6eee8;
+  --surface-subagent: #dde8f3;
+  --on-info: #2c5c8f;
+  --on-info-dim: #3a5a76;
+  --on-approve: #4f6136;
+  --on-warn: #7a5c14;
+  --on-ok: #256132;
+
+  --tok-keyword: #7b3fbf;
+  --tok-string: #1f6f42;
+  --tok-number: #9a5b12;
+  --tok-comment: #5f6b63;
+  --tok-function: #1c5f8f;
+  --tok-constant: #a33263;
+  --tok-property: #7a5c14;
+  --tok-operator: #4a5650;
+  --tok-added: #1f6f42;
+  --tok-removed: #a3322a;
+
+  --scroll-shadow: rgba(0, 0, 0, 0.14);
+
+  color-scheme: light;
 }
 
 * {
@@ -98,6 +182,15 @@ pre,
   background: #1a3b24;
   border-color: #4f865b;
   color: #9dcc9f;
+}
+
+/* Secondary: a retry is available, not the obvious next step. */
+.btn-regenerate {
+  align-self: flex-end;
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text-dim);
+  white-space: nowrap;
 }
 
 .btn-cancel {

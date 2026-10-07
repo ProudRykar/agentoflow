@@ -86,6 +86,14 @@ class ResearchPage:
     content: str
     links: tuple[str, ...]
     content_bytes: int
+    # The body was longer than the tool returns, so ``content`` is a
+    # prefix. Reported rather than left implicit: content_bytes is the
+    # full length, so without this a reader comparing the two sees a
+    # mismatch and has no way to tell whether it is truncation or a
+    # counting bug. And byte_limit_reached refers to the *transfer*
+    # limit, which is a different limit that had not triggered.
+    truncated: bool = False
+    http_status: int | None = None
 
     def __post_init__(self) -> None:
         if self.depth < 0:
@@ -206,6 +214,8 @@ class ResearchResult:
                     "content": page.content,
                     "links": list(page.links),
                     "content_bytes": page.content_bytes,
+                    "truncated": page.truncated,
+                    "http_status": page.http_status,
                 }
                 for page in self.pages
             ],

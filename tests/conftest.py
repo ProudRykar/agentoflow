@@ -31,7 +31,10 @@ def make_stub_runtime_factory(
     from agent_workflow.core.entities.models.tool_registry import (
         ToolRegistry,
     )
-    from agent_workflow.core.infrastructure.config import LLMConfig
+    from agent_workflow.core.entities.models.tool_toggle import (
+        ToolToggle,
+    )
+    from agent_workflow.core.infrastructure.config import AgentConfig, LLMConfig
     from agent_workflow.core.infrastructure.paths import (
         AgentWorkflowPaths,
     )
@@ -56,12 +59,23 @@ def make_stub_runtime_factory(
         approval_handler,
         working_directory=None,
         stats_store=None,
+        mcp_pool=None,
+        session_id="",
     ) -> AgentRuntime:
+        # mcp_pool and session_id are accepted and ignored: a real
+        # runtime shares MCP processes through the pool, and the stub
+        # has no servers to share.
+        del mcp_pool, session_id
         work = Path(
             working_directory or tmp_path
         ).resolve()
 
         registry = ToolRegistry()
+
+        # Mirrors a real runtime, where the toggle owns which tools
+        # are hidden. Left empty: registering stub tools here would
+        # change what every other transport test sees.
+        toggle = ToolToggle(registry)
 
         return AgentRuntime(
             agent=Agent(
@@ -81,9 +95,13 @@ def make_stub_runtime_factory(
             config=type(
                 "StubConfig",
                 (),
-                {"llm": LLMConfig(model="stub-model")},
+                {
+                    "llm": LLMConfig(model="stub-model"),
+                    "agent": AgentConfig(),
+                },
             )(),
             plugin_manager=None,
+            tool_toggle=toggle,
         )
 
     return factory
@@ -109,6 +127,25 @@ def isolated_home(
     (home / ".agentoflow").mkdir(parents=True, exist_ok=True)
 
     yield home
+
+
+@pytest.fixture(autouse=True)
+def _no_leaked_network_outage():
+    """Clear the recorded outage between tests.
+
+    The guard in ``web_failure`` is deliberately process-wide, because
+    that is what makes it suppress a burst of retries inside one run.
+    Left in place it would carry a failure in one test into the next,
+    which reads as a network bug that is not there.
+    """
+
+    from agent_workflow.core.entities.models import web_failure
+
+    web_failure.reset()
+
+    yield
+
+    web_failure.reset()
 
 
 @pytest.fixture

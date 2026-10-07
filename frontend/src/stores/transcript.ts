@@ -1,4 +1,13 @@
-import type { WireEnvelope } from '../api/types'
+import type {
+  PlanStepInfo,
+  TodoInfo,
+  WireEnvelope,
+} from '../api/types'
+import {
+  addRunUsage,
+  emptyRunUsage,
+  type RunUsageView,
+} from '../features/chat/runUsage'
 
 export type ToolStatus = 'running' | 'success' | 'error'
 
@@ -88,6 +97,33 @@ export interface RunBlocks {
 export interface RunState {
   phase: string | null
   iteration: number
+  /** Tokens in the last assembled request, and the budget for it. */
+  contextUsed: number | null
+  contextLimit: number | null
+  /** The assembler dropped or truncated blocks to fit. */
+  contextTrimmed: boolean
+  /** True when the count came from a real tokenizer, not a heuristic. */
+  contextCounterExact: boolean
+  /** Which blocks were dropped or cut, by name. */
+  contextDropped: string[]
+  /** What the provider last reported consuming, when it said. */
+  contextMeasured: number | null
+
+  /**
+   * What the whole run cost, so far.
+   *
+   * Per run, not per session: one figure across a whole conversation
+   * cannot be compared against anything, because it grows for reasons
+   * that have nothing to do with the turn being looked at.
+   */
+  runUsage: RunUsageView
+
+  /** The run's token allowance, null when none is configured. */
+  maxPromptTokens: number | null
+  /** The local estimate for that same request, beside the real figure. */
+  contextEstimate: number | null
+  /** tool name -> how many times it failed with the same arguments. */
+  repeatFailures: Record<string, number>
   streamingRunId: string | null
   thinkingRunId: string | null
   runs: Record<string, RunInfo>
@@ -98,6 +134,21 @@ export interface RunState {
   lastError: string
   model: string
   workingDirectory: string
+  /**
+   * The runtime plan, replaced wholesale on every `plan.updated`.
+   * Null until the first one arrives, which is distinct from an empty
+   * plan: one means "not planned yet", the other means "planned, and
+   * there is nothing to do".
+   */
+  plan: {
+    objective: string
+    steps: PlanStepInfo[]
+    revision: number
+    currentStepId: string | null
+  } | null
+
+  /** The checklist the model wrote, when it has written one. */
+  todos: TodoInfo[]
 }
 
 export interface TranscriptState {
@@ -182,9 +233,6 @@ function appendToEntry(
 
   return next
 }
-
-const MAX_OUTPUT_CHARS = 8000
-const COLLAPSED_OUTPUT_CHARS = 500
 
 /** Register an entry id on a run, creating a stub run if needed. */
 function appendToRun(
@@ -274,6 +322,16 @@ export function initialState(): AppState {
     run: {
       phase: null,
       iteration: 0,
+      contextUsed: null,
+      contextLimit: null,
+      contextTrimmed: false,
+      contextCounterExact: true,
+      contextDropped: [],
+      contextMeasured: null,
+      runUsage: emptyRunUsage(),
+      maxPromptTokens: null,
+      contextEstimate: null,
+      repeatFailures: {},
       streamingRunId: null,
       thinkingRunId: null,
       runs: {},
@@ -283,6 +341,8 @@ export function initialState(): AppState {
       estimatedTokens: null,
       lastError: '',
       model: '',
+      plan: null,
+      todos: [],
       workingDirectory: '',
     },
     connection: {
@@ -295,22 +355,34 @@ export function initialState(): AppState {
 
 let counter = 0
 
+/**
+ * Remove the assistant's last answer, and anything it produced.
+ *
+ * Tool entries are dropped with it: they belong to the answer being
+ * replaced, and leaving them would show tool calls whose result the
+ * new answer never refers to.
+ */
+function dropTrailingAssistant(entries: Entry[]): Entry[] {
+  let cutoff = entries.length
+
+  while (cutoff > 0) {
+    const kind = entries[cutoff - 1].kind
+
+    if (kind === 'assistant' || kind === 'tool') {
+      cutoff -= 1
+      continue
+    }
+
+    break
+  }
+
+  return cutoff === entries.length ? entries : entries.slice(0, cutoff)
+}
+
 function nextId(prefix: string): string {
   counter += 1
 
   return `${prefix}-${counter}`
-}
-
-export function truncateOutput(output: string | null): string | null {
-  if (!output) {
-    return null
-  }
-
-  if (output.length <= MAX_OUTPUT_CHARS) {
-    return output
-  }
-
-  return `${output.slice(0, COLLAPSED_OUTPUT_CHARS)}\n… (${output.length} chars total, expand to fetch full output)`
 }
 
 /**
@@ -332,6 +404,7 @@ export function reduce(
       const data = event.data as unknown as {
         state: string
         model: string
+        max_prompt_tokens?: number | null
         working_directory: string
         phase: string | null
         iteration: number | null
@@ -371,6 +444,8 @@ export function reduce(
           model: data.model || state.run.model,
           workingDirectory:
             data.working_directory || state.run.workingDirectory,
+          maxPromptTokens:
+            data.max_prompt_tokens ?? state.run.maxPromptTokens,
         },
       }
     }
@@ -383,18 +458,32 @@ export function reduce(
         agent_id: string
         role: string
         model: string
+        regenerated?: boolean
       }
 
-      const isSubagent = Boolean(data.parent_run_id)
+      const runId = data.run_id || 'main'
 
+      // A run already known to be a child is a subagent, even if this
+      // event carries no parent_run_id: a replayed or duplicated
+      // agent.started would otherwise repeat the delegation prompt as
+      // a fresh user turn.
+      const isSubagent =
+        Boolean(data.parent_run_id) ||
+        Boolean(state.run.runs[runId]?.parentRunId)
+
+      // A retry repeats a question already on screen, so echoing the
+      // prompt would show it twice. The discarded answer goes instead,
+      // which is what the user asked for: a different answer, not a
+      // second copy of the same question.
       const entries = isSubagent
         ? state.transcript.entries
-        : [
-            ...state.transcript.entries,
-            { kind: 'user', id: nextId('user'), content: data.prompt } as UserEntry,
-          ]
+        : data.regenerated
+          ? dropTrailingAssistant(state.transcript.entries)
+          : [
+              ...state.transcript.entries,
+              { kind: 'user', id: nextId('user'), content: data.prompt } as UserEntry,
+            ]
 
-      const runId = data.run_id || 'main'
 
       const previous = state.run.runs[runId]
 
@@ -442,10 +531,47 @@ export function reduce(
       }
     }
 
+    case 'plan.updated': {
+      const data = event.data as unknown as {
+        objective: string
+        steps: PlanStepInfo[]
+        revision: number
+        current_step_id: string | null
+        todos?: TodoInfo[]
+      }
+
+      return {
+        ...state,
+        transcript: {
+          ...state.transcript,
+          latestSeq: event.seq,
+        },
+        run: {
+          ...state.run,
+          // Replaced, never merged: the server sends the whole plan,
+          // and merging would keep steps that a revision has dropped.
+          plan: {
+            objective: data.objective ?? '',
+            steps: data.steps ?? [],
+            revision: data.revision ?? 0,
+            currentStepId: data.current_step_id ?? null,
+          },
+          // Replaced wholesale, like the plan: the model sends the
+          // whole list, and an item it dropped must disappear rather
+          // than linger as a row the user thinks is still planned.
+          todos: data.todos ?? state.run.todos,
+        },
+      }
+    }
+
     case 'llm.requested': {
       const data = event.data as unknown as {
         iteration: number
         estimated_tokens: number | null
+        context_limit?: number | null
+        context_trimmed?: boolean
+        counter_exact?: boolean
+        dropped_blocks?: string[]
       }
 
       return {
@@ -455,6 +581,12 @@ export function reduce(
           {
             ...state.run,
             iteration: data.iteration,
+            contextUsed: data.estimated_tokens ?? null,
+            contextLimit:
+              data.context_limit ?? state.run.contextLimit,
+            contextTrimmed: Boolean(data.context_trimmed),
+            contextCounterExact: data.counter_exact !== false,
+            contextDropped: data.dropped_blocks ?? [],
             thinkingRunId: runKey || state.run.thinkingRunId,
             estimatedTokens: data.estimated_tokens,
           },
@@ -503,7 +635,10 @@ export function reduce(
           id,
           iteration: data.iteration,
           content: data.content,
-          expanded: false,
+          // Open by default. The reasoning is the substance of a
+          // run, and a collapsed card hides a wrong turn until after
+          // the answer has been read.
+          expanded: true,
           runId: runKey,
         },
       ]
@@ -596,6 +731,17 @@ export function reduce(
     }
 
     case 'llm.responded': {
+      const usage = event.data as unknown as {
+        prompt_tokens?: number | null
+        estimated_prompt_tokens?: number | null
+      }
+
+      const counted = addRunUsage(state.run.runUsage, runKey, {
+        promptTokens: usage.prompt_tokens ?? null,
+        completionTokens: 0,
+        estimatedCost: null,
+      })
+
       // Only this run's entries: clearing every assistant entry
       // would also close a subagent's in-flight answer.
       const entries = state.transcript.entries.map((entry) =>
@@ -612,6 +758,13 @@ export function reduce(
             ...state.run,
             streamingRunId: null,
             thinkingRunId: null,
+            // The provider's own figure beside our estimate. Having
+            // both is what makes the meter trustworthy: a guess shown
+            // as a measurement is indistinguishable from a wrong one.
+            contextMeasured: usage.prompt_tokens ?? null,
+            contextEstimate:
+              usage.estimated_prompt_tokens ?? null,
+            runUsage: counted,
           },
           runKey,
           { thinkingId: null, contentId: null },
@@ -639,7 +792,10 @@ export function reduce(
         errorCode: null,
         errorMessage: null,
         durationSeconds: null,
-        expanded: false,
+        // Open by default. A hidden result is the one thing in the
+        // transcript that cannot be read without another click, and it
+        // is exactly the part that explains what the agent just did.
+        expanded: true,
         runId: runKey,
       }
 
@@ -661,33 +817,63 @@ export function reduce(
     case 'tool.finished': {
       const data = event.data as unknown as {
         tool_call_id: string
-        output: string | null
+        tool_name: string
         error_code: string | null
         error_message: string | null
+        output: string | null
         duration_seconds: number | null
       }
 
-      const entries = state.transcript.entries.map((entry) => {
-        if (entry.kind !== 'tool') {
-          return entry
-        }
+      const entries: Entry[] = state.transcript.entries.map((entry) =>
+        entry.kind === 'tool' && entry.callId === data.tool_call_id
+          ? {
+              ...entry,
+              status:
+                data.error_code === null
+                  ? ('success' as const)
+                  : ('error' as const),
+              output: data.output,
+              errorCode: data.error_code,
+              errorMessage: data.error_message,
+              durationSeconds: data.duration_seconds,
+            }
+          : entry,
+      )
 
-        const tool = entry as ToolEntry
+      const failed = data.error_code !== null
 
-        if (tool.callId !== data.tool_call_id) {
-          return entry
-        }
+      if (failed) {
+        // A repeat count per tool is what turns "something failed"
+        // into something the user can act on: one hiccup is noise,
+        // five identical failures is a broken tool.
+        const previous = state.run.repeatFailures[data.tool_name] ?? 0
+        const next = previous + 1
 
         return {
-          ...tool,
-          status: data.error_code ? ('error' as const) : ('success' as const),
-          output: truncateOutput(data.output),
-          errorCode: data.error_code,
-          errorMessage: data.error_message,
-          durationSeconds: data.duration_seconds,
-          expanded: Boolean(data.error_code),
+          ...state,
+          transcript: { ...state.transcript, entries, latestSeq: event.seq },
+          run: {
+            ...state.run,
+            repeatFailures: {
+              ...state.run.repeatFailures,
+              [data.tool_name]: next,
+            },
+          },
         }
-      })
+      }
+
+      // A success means the tool is healthy again.
+      if (state.run.repeatFailures[data.tool_name]) {
+        const next = { ...state.run.repeatFailures }
+
+        delete next[data.tool_name]
+
+        return {
+          ...state,
+          transcript: { ...state.transcript, entries, latestSeq: event.seq },
+          run: { ...state.run, repeatFailures: next },
+        }
+      }
 
       return {
         ...state,
@@ -866,4 +1052,141 @@ export function toggleEntry(state: AppState, id: string): AppState {
     ...state,
     transcript: { ...state.transcript, entries },
   }
+}
+
+/* ==================================================================
+ * Transcript queries
+ * ================================================================== */
+
+/** Entry kinds that can be filtered out of the transcript. */
+export type EntryFilter = 'all' | 'thinking' | 'tools' | 'errors'
+
+export const ENTRY_FILTERS: {
+  value: EntryFilter
+  label: string
+}[] = [
+  { value: 'all', label: 'All' },
+  { value: 'thinking', label: 'Thinking' },
+  { value: 'tools', label: 'Tools' },
+  { value: 'errors', label: 'Errors' },
+]
+
+function matchesFilter(entry: Entry, filter: EntryFilter): boolean {
+  switch (filter) {
+    case 'thinking':
+      return entry.kind === 'thinking'
+    case 'tools':
+      return entry.kind === 'tool'
+    case 'errors':
+      return (
+        entry.kind === 'error' ||
+        (entry.kind === 'tool' && entry.status === 'error')
+      )
+    case 'all':
+    default:
+      return true
+  }
+}
+
+/** The text a search term is matched against, per entry kind. */
+export function searchableText(entry: Entry): string {
+  switch (entry.kind) {
+    case 'user':
+    case 'assistant':
+    case 'error':
+      return entry.content
+    case 'thinking':
+      return entry.content
+    case 'tool':
+      return [
+        entry.name,
+        JSON.stringify(entry.arguments ?? {}),
+        entry.output ?? '',
+        entry.errorMessage ?? '',
+      ].join('\n')
+    default:
+      return ''
+  }
+}
+
+export interface TranscriptQuery {
+  search: string
+  filter: EntryFilter
+}
+
+export interface TranscriptSlice {
+  /** Entries to render, after filter and search. */
+  entries: Entry[]
+  /** How many entries matched, before search narrowed them. */
+  total: number
+  matches: number
+  search: string
+  filter: EntryFilter
+  active: boolean
+}
+
+/**
+ * Filter and search the transcript.
+ *
+ * A long restored session can hold thousands of entries, so the
+ * search runs on the flat view model rather than the DOM: the result
+ * is what gets rendered.
+ */
+export function queryTranscript(
+  entries: Entry[],
+  query: TranscriptQuery,
+): TranscriptSlice {
+  const needle = query.search.trim().toLowerCase()
+
+  const filtered = entries.filter((entry) =>
+    matchesFilter(entry, query.filter),
+  )
+
+  const searched = needle
+    ? filtered.filter((entry) =>
+        searchableText(entry).toLowerCase().includes(needle),
+      )
+    : filtered
+
+  return {
+    entries: searched,
+    total: entries.length,
+    matches: needle ? searched.length : filtered.length,
+    search: needle ? query.search : '',
+    filter: query.filter,
+    active: needle.length > 0 || query.filter !== 'all',
+  }
+}
+
+/** Tools that failed at least twice, worst first. */
+export function repeatedFailures(
+  failures: Record<string, number>,
+  threshold = 2,
+): { tool: string; count: number }[] {
+  return Object.entries(failures)
+    .filter(([, count]) => count >= threshold)
+    .map(([tool, count]) => ({ tool, count }))
+    .sort((left, right) => right.count - left.count)
+}
+
+/** A 0-1 ratio plus a severity, for the context meter. */
+export function budgetSeverity(
+  used: number | null,
+  limit: number | null,
+): { ratio: number; tone: 'ok' | 'warn' | 'over' } {
+  if (used === null || limit === null || limit <= 0) {
+    return { ratio: 0, tone: 'ok' }
+  }
+
+  const ratio = used / limit
+
+  if (ratio > 1) {
+    return { ratio, tone: 'over' }
+  }
+
+  if (ratio >= 0.8) {
+    return { ratio, tone: 'warn' }
+  }
+
+  return { ratio, tone: 'ok' }
 }

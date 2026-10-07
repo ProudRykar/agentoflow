@@ -83,7 +83,13 @@ class ArgumentDecoder:
         self,
         data: dict[str, object],
         input_type: type[InputT],
+        path: str = "",
     ) -> InputT:
+        """Build ``input_type`` from a mapping.
+
+        ``path`` prefixes every field name in an error, so a failure
+        inside a nested object says which one.
+        """
         if not is_dataclass(input_type):
             return self._decode_opaque(
                 data,
@@ -100,7 +106,18 @@ class ArgumentDecoder:
                 data[sole],
                 dict,
             ):
-                data = data[sole]
+                # Unwrapped only when the name is not a field of this
+                # type. "arguments" and "properties" are envelope names
+                # *and* ordinary field names, so matching on the name
+                # alone meant a tool whose single field was called
+                # "arguments" had that field's own value replaced, and
+                # every key inside it then read as unknown. If the type
+                # declares the name, the caller meant the field.
+                if sole not in {
+                    field.name
+                    for field in fields(input_type)
+                }:
+                    data = data[sole]
 
         input_fields = fields(input_type)
         field_names = {
@@ -111,7 +128,7 @@ class ArgumentDecoder:
         for name in data:
             if name not in field_names:
                 raise ArgumentDecoderErrorFactory.unknown_field(
-                    name,
+                    f"{path}{name}" if path else name,
                     valid=tuple(sorted(field_names)),
                 )
 
@@ -126,7 +143,9 @@ class ArgumentDecoder:
                     and field.default_factory is MISSING
                 ):
                     raise ArgumentDecoderErrorFactory.missing_field(
-                        field=field.name,
+                        field=f"{path}{field.name}"
+                        if path
+                        else field.name,
                     )
 
                 continue
@@ -138,10 +157,17 @@ class ArgumentDecoder:
                 value = self._decode_value(
                     value,
                     field_type,
+                    f"{path}{field.name}."
+                    if path
+                    else f"{field.name}.",
                 )
             except (TypeError, ValueError) as exc:
                 raise ArgumentDecoderErrorFactory.invalid_type(
-                    field=field.name,
+                    field=(
+                        f"{path}{field.name}"
+                        if path
+                        else field.name
+                    ),
                     expected=self._type_name(field_type),
                     actual=type(value).__name__,
                 ) from exc
@@ -151,7 +177,11 @@ class ArgumentDecoder:
                 field_type,
             ):
                 raise ArgumentDecoderErrorFactory.invalid_type(
-                    field=field.name,
+                    field=(
+                        f"{path}{field.name}"
+                        if path
+                        else field.name
+                    ),
                     expected=self._type_name(field_type),
                     actual=type(value).__name__,
                 )
@@ -247,17 +277,75 @@ class ArgumentDecoder:
             code="invalid_input_type",
         )
 
+    @staticmethod
+    def _at(
+        path: str,
+        segment: str,
+        *,
+        separator: str = ".",
+    ) -> str:
+        """Extend a path with a container segment.
+
+        Paths read as dotted names: ``calls.`` means "inside calls", and
+        appending blindly would give ``calls.[1].`` The separator is
+        dropped first so an indexed entry reads as one name.
+
+        The joiner differs by segment. An index attaches to the field
+        it qualifies, so ``calls[1].``; a mapping key is a separate
+        name, so ``others.alpha.``. Joining both the same way is how
+        ``calls.[1]`` and ``othersalpha`` come about.
+        """
+
+        prefix = path[:-1] if path.endswith(".") else path
+
+        return f"{prefix}{separator}{segment}."
+
     @classmethod
     def _decode_value(
         cls,
         value: object,
         expected_type: Any,
+        path: str = "",
     ) -> object:
         if expected_type is Any:
             return value
 
         origin = get_origin(expected_type)
         args = get_args(expected_type)
+
+        # A dataclass nested inside another: build it the same way the
+        # top level is built, so the two cannot drift apart. Without
+        # this the value came back as the raw dict, which looked like
+        # a successful decode right up until the handler reached for
+        # an attribute that was not there.
+        #
+        # An instance already of the right type is passed through, so
+        # a caller supplying decoded objects is not punished for it.
+        if (
+            isinstance(expected_type, type)
+            and is_dataclass(expected_type)
+        ):
+            if isinstance(value, expected_type):
+                return value
+
+            if not isinstance(value, dict):
+                raise ArgumentDecoderErrorFactory.invalid_type(
+                    field=path or "<input>",
+                    expected=expected_type.__name__,
+                    actual=type(value).__name__,
+                )
+
+            # ``cls`` is the class here (this is a classmethod) while
+            # ``decode`` is an instance method, so the instance has to
+            # be made explicitly or the payload lands in ``self``.
+            #
+            # The path is already threaded through the containers, so
+            # a failure below arrives naming the exact item.
+            return cls().decode(
+                value,
+                expected_type,
+                path=path,
+            )
 
         # Enum:
         #
@@ -334,13 +422,18 @@ class ArgumentDecoder:
             if not args:
                 return value
 
-            return [
-                cls._decode_value(
-                    item,
-                    args[0],
+            decoded_items: list[object] = []
+
+            for index, item in enumerate(value):
+                decoded_items.append(
+                    cls._decode_value(
+                        item,
+                        args[0],
+                        cls._at(path, f"[{index}]", separator=""),
+                    )
                 )
-                for item in value
-            ]
+
+            return decoded_items
 
         # set[T]
         if origin is set:
@@ -350,10 +443,14 @@ class ArgumentDecoder:
             if not args:
                 return value
 
+            # No index: a set has no order, so "[2]" would name a
+            # different member on every run and send the model looking
+            # for an entry that is not there.
             return {
                 cls._decode_value(
                     item,
                     args[0],
+                    path,
                 )
                 for item in value
             }
@@ -371,8 +468,9 @@ class ArgumentDecoder:
                     cls._decode_value(
                         item,
                         args[0],
+                        cls._at(path, f"[{index}]", separator=""),
                     )
-                    for item in value
+                    for index, item in enumerate(value)
                 )
 
             if len(value) != len(args):
@@ -407,6 +505,7 @@ class ArgumentDecoder:
                 ): cls._decode_value(
                     item,
                     value_type,
+                    cls._at(path, str(key)),
                 )
                 for key, item in value.items()
             }
@@ -501,7 +600,12 @@ class ArgumentDecoder:
 
         # tuple[T, ...] / tuple[T, U]
         if origin is tuple:
-            if not isinstance(value, tuple):
+            # A list is accepted. JSON has one array type and no
+            # tuples, so every tuple-annotated field arrives from a
+            # model as a list: rejecting it made *every* tool with a
+            # tuple field unusable in practice -- including `remember`
+            # with tags, which had been failing the same way.
+            if not isinstance(value, (tuple, list)):
                 return False
 
             if not args:

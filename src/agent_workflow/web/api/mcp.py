@@ -66,6 +66,7 @@ async def list_mcp(
                 server_version=server.server_version,
                 protocol_version=server.protocol_version,
                 instructions=server.instructions,
+                warnings=list(server.warnings),
                 tools=tools,
                 connected_at=server.connected_at,
                 startup_seconds=round(
@@ -458,6 +459,15 @@ async def server_action(
         # resulting state, so the UI can show the server's own
         # diagnostics instead of a generic gateway error.
         await manager.connect(name)
+
+    # Reconnecting re-registers the server's tools, which would
+    # resurrect anything the operator switched off. Re-applying the
+    # disabled set here keeps a reconnect from undoing that choice.
+    toggle = getattr(session.runtime, "tool_toggle", None)
+
+    if toggle is not None:
+        toggle.observe()
+        toggle.apply()
 
     session.refresh_permissions()
 

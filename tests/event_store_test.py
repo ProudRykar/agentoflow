@@ -27,6 +27,7 @@ from agent_workflow.core.entities.models.agent_trace import (
     AgentStarted,
     LLMContentChunk,
     LLMResponded,
+    RunFailed,
     ToolFinished,
     ToolStarted,
 )
@@ -170,7 +171,9 @@ def test_store_after_seq(tmp_path: Path) -> None:
     ]
 
 
-def test_store_prunes_old_events(tmp_path: Path) -> None:
+def test_store_prunes_old_events_when_a_bound_is_asked_for(
+    tmp_path: Path,
+) -> None:
     store = EventStore(tmp_path / "events.db", keep_events=10)
 
     store.append(
@@ -183,6 +186,61 @@ def test_store_prunes_old_events(tmp_path: Path) -> None:
 
     assert store.count("s1") == 10
     assert store.latest_seq("s1") == 50
+    # A trimmed log has to be able to say where it starts.
+    assert store.oldest_seq("s1") == 41
+
+
+def test_store_keeps_everything_by_default(tmp_path: Path) -> None:
+    """The head of a long session must survive.
+
+    This used to trim at 2000 events, which silently deleted the
+    opening turns of any long conversation. The damage was permanent:
+    `agent.started` is the only event the UI turns back into a user
+    message, so a trimmed log re-rendered a session with no prompts at
+    all, and the reader could not scroll up to anything.
+    """
+
+    store = EventStore(tmp_path / "events.db")
+
+    store.append(
+        "s1",
+        [
+            StoredEvent(seq=index, event=AgentStarted(prompt=str(index)))
+            for index in range(1, 5_001)
+        ],
+    )
+
+    assert store.count("s1") == 5_000
+    assert store.oldest_seq("s1") == 1
+    assert store.latest_seq("s1") == 5_000
+
+
+def test_oldest_seq_is_zero_for_an_unknown_session(
+    tmp_path: Path,
+) -> None:
+    store = EventStore(tmp_path / "events.db")
+
+    assert store.oldest_seq("nobody") == 0
+
+
+def test_run_failed_survives_the_log(tmp_path: Path) -> None:
+    """A session whose last run failed must still show it after a restart.
+
+    The event was published and stored, but it was absent from the
+    decoder registry, so replay dropped it and the failure vanished.
+    """
+
+    store = EventStore(tmp_path / "events.db")
+
+    store.append(
+        "s1",
+        [StoredEvent(seq=1, event=RunFailed(session_id="s1", error="boom"))],
+    )
+
+    loaded = store.load("s1")
+
+    assert len(loaded) == 1
+    assert loaded[0].event == RunFailed(session_id="s1", error="boom")
 
 
 def test_forget_removes_transcript(tmp_path: Path) -> None:

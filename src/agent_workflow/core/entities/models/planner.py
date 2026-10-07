@@ -148,18 +148,33 @@ class Planner:
 
     # User verbs used to derive a concise objective.
     _VERB_PATTERNS = (
-        r"^(изучи|изучить|обучи|обучить)\s+",
-        r"^(сравни|сравнить|сравнение)\s+",
-        r"^(найди|найти|поищи|поиск)\s+",
-        r"^(напиши|написать|создай|создать)\s+",
-        r"^(проанализируй|проанализировать|анализ)\s+",
-        r"^(почитай|прочти|прочитать)\s+",
-        r"^(исследуй|исследовать|исследование)\s+",
-        r"^(расскажи|рассказать)\s+",
+        r"^(изучи|изучить|обучи|обучить)\b\s*",
+        r"^(сравни|сравнить|сравнение)\b\s*",
+        r"^(найди|найти|поищи|поиск)\b\s*",
+        r"^(напиши|написать|создай|создать)\b\s*",
+        r"^(проанализируй|проанализировать|анализ)\b\s*",
+        r"^(почитай|прочти|прочитать)\b\s*",
+        r"^(исследуй|исследовать|исследование)\b\s*",
+        r"^(расскажи|рассказать)\b\s*",
         (
             r"^(review|analyze|analyse|compare|research|"
-            r"investigate|read|inspect|study)\s+"
+            r"investigate|read|inspect|study)\b\s*"
         ),
+    )
+
+    _PREPOSITION_BEFORE_URL = re.compile(
+        r"\b(?:по|на|для|из|с|со|в|во|о|об|от|до|"
+        r"about|for|from|on|in|at|with)\s+(?=\S*https?://)",
+        re.IGNORECASE,
+    )
+
+    # Prepositions left stranded once their object was removed with a
+    # URL or a coverage clause. "API на и" is not an objective, and
+    # neither is "документацию по".
+    _DANGLING_TAIL = re.compile(
+        r"\s+(?:по|на|для|из|с|со|в|во|о|об|и|а|но|не|поэтому|"
+        r"for|from|of|on|in|to|at|with|and)\s*$",
+        re.IGNORECASE,
     )
 
     # Research intent is intentionally broader than _VERB_PATTERNS.
@@ -210,6 +225,50 @@ class Planner:
         )
         """,
         re.IGNORECASE | re.VERBOSE,
+    )
+
+    # A prompt that is nothing but the verb ("найди" + a URL) has no
+    # objective left once the verb is stripped. The sources are what
+    # the task actually names, so the fallback is used instead of
+    # keeping a bare imperative as the goal.
+    _BARE_VERB_FORMS = frozenset(
+        {
+            "изучи",
+            "изучить",
+            "обучи",
+            "обучить",
+            "сравни",
+            "сравнить",
+            "сравнение",
+            "найди",
+            "найти",
+            "поищи",
+            "поиск",
+            "напиши",
+            "написать",
+            "создай",
+            "создать",
+            "проанализируй",
+            "проанализировать",
+            "анализ",
+            "почитай",
+            "прочти",
+            "прочитать",
+            "исследуй",
+            "исследовать",
+            "исследование",
+            "расскажи",
+            "рассказать",
+            "review",
+            "analyze",
+            "analyse",
+            "compare",
+            "research",
+            "investigate",
+            "read",
+            "inspect",
+            "study",
+        }
     )
 
     _LEADING_GREETINGS = frozenset(
@@ -297,7 +356,7 @@ class Planner:
         steps.append(
             PlanStep(
                 id="execution",
-                description=task.objective,
+                description=self._execution_description(task),
                 phase=AgentPhase.EXECUTION,
                 delegation_hint=self._hint_for_phase(
                     AgentPhase.EXECUTION,
@@ -1001,17 +1060,53 @@ class Planner:
         self,
         contract: TaskContract,
     ) -> str:
+        """
+        Name the sources, not just the intent.
+
+        "Провести исследование" tells the model nothing it could not
+        already infer from the task anchor, and cannot be checked off.
+        Listing the roots and the coverage turns the step into
+        something with an end state.
+        """
+
         research = contract.research
 
         if research is None:
-            return (
-                "Провести необходимое исследование."
-            )
+            return "Провести необходимое исследование."
 
-        return (
-            "Исследовать указанные источники и "
-            "достичь требуемого покрытия."
+        roots = ", ".join(research.root_urls)
+
+        coverage = (
+            f"не менее {research.min_pages} страниц"
         )
+
+        if research.min_depth:
+            coverage += f", глубина {research.min_depth}"
+
+        return f"Изучить источники ({roots}) — {coverage}."
+
+    def _execution_description(
+        self,
+        task: TaskPlan,
+    ) -> str:
+        """
+        The work itself, stated as something to be done.
+
+        Was the bare objective. That restated the task anchor in the
+        step that exists to act on it, so the one step a reader looks
+        at said nothing about what would count as doing it.
+
+        Deliberately says nothing about verification or reflection:
+        both are separate checklist items, and naming them here as
+        well would have the plan asking for the same check twice.
+        """
+
+        goal = task.objective
+
+        if not goal:
+            return "Выполнить поставленную задачу."
+
+        return f"Выполнить задачу: {goal}"
 
     # ------------------------------------------------------------------
     # Plan validation
@@ -1136,6 +1231,35 @@ class Planner:
             cleaned,
         ).strip()
 
+        # Coverage requirements are not the goal. They are already
+        # captured in the research contract, and leaving them glued to
+        # the objective produces a step like "study the docs by at
+        # least 5 pages" -- a restatement of a constraint wearing the
+        # objective's clothes.
+        cleaned = self._strip_coverage_requirements(
+            cleaned,
+        )
+
+        cleaned = re.sub(
+            r"\s+",
+            " ",
+            cleaned,
+        ).strip(" ,;:-")
+
+        # Applied in a loop: "по ... и" strands two in a row.
+        while True:
+            stripped = self._DANGLING_TAIL.sub(
+                "",
+                cleaned,
+            )
+
+            if stripped == cleaned:
+                break
+
+            cleaned = stripped
+
+        cleaned = cleaned.strip(" ,;:-")
+
         cleaned = self._strip_leading_greeting(
             cleaned,
         )
@@ -1147,6 +1271,10 @@ class Planner:
         if objective:
             return objective
 
+        # A lone verb is not an objective, whatever came after it.
+        if cleaned.lower().strip(" ,;:-") in self._BARE_VERB_FORMS:
+            cleaned = ""
+
         if cleaned:
             return cleaned
 
@@ -1156,6 +1284,31 @@ class Planner:
             )
 
         return "Выполнить поставленную задачу."
+
+    def _strip_coverage_requirements(
+        self,
+        text: str,
+    ) -> str:
+        """
+        Remove page/depth clauses; the research contract owns them.
+        """
+
+        for pattern in (
+            self._PAGE_COUNT_PATTERN,
+            self._DEPTH_PATTERN,
+        ):
+            text = pattern.sub(" ", text)
+
+        # Words left stranded once their numbers are gone.
+        text = re.sub(
+            r"\b(?:минимум|minimum|min|at\s+least|не\s+менее|"
+            r"не\s+меньше|глубина|depth)\b",
+            " ",
+            text,
+            flags=re.IGNORECASE,
+        )
+
+        return re.sub(r"\s+", " ", text).strip()
 
     def _strip_leading_greeting(
         self,
@@ -1430,7 +1583,22 @@ class Planner:
         self,
         prompt: str,
     ) -> str:
-        return self._URL_PATTERN.sub(
+        """
+        Drop the URLs, and the preposition that governed them.
+
+        "документацию по https://..." becomes "документацию по" once
+        the URL goes, and the orphaned preposition is then either a
+        dangling tail to be stripped or, left alone, a fragment that
+        reads as broken Russian. Taking the preposition with the URL it
+        belonged to avoids having to repair it afterwards.
+        """
+
+        without_preposition = self._PREPOSITION_BEFORE_URL.sub(
             " ",
             prompt,
+        )
+
+        return self._URL_PATTERN.sub(
+            " ",
+            without_preposition,
         )

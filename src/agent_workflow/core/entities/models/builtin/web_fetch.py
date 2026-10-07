@@ -446,7 +446,12 @@ async def web_fetch(
             if len(clean_text) > MAX_TEXT_SIZE:
                 clean_text = (
                     clean_text[:MAX_TEXT_SIZE]
-                    + "\n[content truncated]"
+                    + (
+                        "\n[content truncated: "
+                        f"{len(clean_text)} characters were "
+                        f"reduced to {MAX_TEXT_SIZE}; the page "
+                        "continues past this point]"
+                    )
                 )
 
                 content_truncated = True
@@ -463,6 +468,12 @@ async def web_fetch(
                 content=clean_text,
                 links=links,
                 content_bytes=len(body),
+                # Both limits, because either one alone leaves the
+                # caller believing it holds the whole page.
+                truncated=(
+                    response_truncated or content_truncated
+                ),
+                http_status=status_code,
             )
 
             result = ResearchResult(

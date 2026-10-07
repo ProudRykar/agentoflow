@@ -4,8 +4,9 @@ import importlib.metadata
 import importlib.util
 import sys
 from pathlib import Path
-from typing import Any, Callable, Awaitable
+from typing import Any, Awaitable, Callable
 
+from agent_workflow.core.entities.models.event_sink import emit_to
 from agent_workflow.core.entities.models.plugins.plugin import (
     Plugin,
     PluginMetadata,
@@ -164,6 +165,6 @@ class PluginLoader:
                         plugin_version=metadata.version,
                         metadata={"error": str(exc)},
                     )
-                    await on_event(event)
+                    await emit_to(on_event, event)
 
         return loaded

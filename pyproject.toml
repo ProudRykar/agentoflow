@@ -9,6 +9,10 @@ authors = [
 requires-python = ">=3.12.8"
 dependencies = [
     "fastapi>=0.115.0",
+    # Parses the GraphQL document so mutations can be refused before
+    # the request is sent; matching the word "mutation" in the text
+    # is not a check.
+    "graphql-core>=3.2.0",
     "httpx>=0.28.1",
     "prompt-toolkit>=3.0.53",
     "pydantic>=2.0.0",
@@ -30,6 +34,14 @@ build-backend = "uv_build"
 [tool.uv.build-backend]
 module-root = "src"
 
+[project.optional-dependencies]
+# JavaScript rendering for link-in-bio and social pages, which serve an
+# empty shell without it. Opt-in because it pulls in a browser:
+#   uv sync --extra render && playwright install chromium
+render = [
+    "playwright>=1.63.0",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
@@ -38,6 +50,9 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+markers = [
+    "render: needs a real browser; skipped when none is installed",
+]
 
 [project.scripts]
 agentoflow = "agent_workflow.cli.main:main"

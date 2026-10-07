@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -1053,3 +1054,147 @@ async def test_connect_refused_when_disabled() -> None:
 
     with pytest.raises(MCPError, match="disabled"):
         await manager.connect("test")
+
+
+# ======================================================================
+# Container runtime environment
+# ======================================================================
+
+
+def _warnings_for(tmp_path: Path, body: str) -> tuple[str, ...]:
+    from agent_workflow.core.infrastructure.config import (
+        ConfigLoader,
+        server_configuration_warnings,
+    )
+
+    config = ConfigLoader().load(write_config(tmp_path, body))
+    entry = config.mcp.servers[0]
+
+    return server_configuration_warnings(
+        entry.command,
+        entry.args,
+        entry.env,
+    )
+
+
+def test_container_runtime_without_env_flag_warns(
+    tmp_path: Path,
+) -> None:
+    # The variable reaches podman but never the container, so the
+    # server silently falls back to its own default. This exact
+    # mismatch is a silent failure, which is why it is checked here.
+    warnings = _warnings_for(
+        tmp_path,
+        """
+        [mcp]
+        enabled = true
+
+        [mcp.servers.Stash]
+        command = "podman"
+        args = ["run", "-i", "--rm", "stash-mcp:local"]
+
+        [mcp.servers.Stash.env]
+        STASH_ENDPOINT = "http://host.containers.internal:9999"
+        """,
+    )
+
+    assert len(warnings) == 1
+    assert "container runtime" in warnings[0]
+    assert "STASH_ENDPOINT" in warnings[0]
+    assert "-e" in warnings[0]
+
+
+def test_forwarded_env_produces_no_warning(tmp_path: Path) -> None:
+    warnings = _warnings_for(
+        tmp_path,
+        """
+        [mcp]
+        enabled = true
+
+        [mcp.servers.Stash]
+        command = "podman"
+        args = ["run", "-i", "--rm", "-e", "STASH_ENDPOINT", "img"]
+
+        [mcp.servers.Stash.env]
+        STASH_ENDPOINT = "http://host.containers.internal:9999"
+        """,
+    )
+
+    assert warnings == ()
+
+
+def test_inline_env_value_produces_no_warning(tmp_path: Path) -> None:
+    warnings = _warnings_for(
+        tmp_path,
+        """
+        [mcp]
+        enabled = true
+
+        [mcp.servers.Stash]
+        command = "docker"
+        args = ["run", "-i", "--env", "STASH_ENDPOINT=http://x", "img"]
+
+        [mcp.servers.Stash.env]
+        STASH_ENDPOINT = "http://host.containers.internal:9999"
+        """,
+    )
+
+    assert warnings == ()
+
+
+def test_no_warning_without_env_vars(tmp_path: Path) -> None:
+    warnings = _warnings_for(
+        tmp_path,
+        """
+        [mcp]
+        enabled = true
+
+        [mcp.servers.Stash]
+        command = "podman"
+        args = ["run", "-i", "--rm", "img"]
+        """,
+    )
+
+    assert warnings == ()
+
+
+def test_no_warning_for_a_plain_command(tmp_path: Path) -> None:
+    warnings = _warnings_for(
+        tmp_path,
+        """
+        [mcp]
+        enabled = true
+
+        [mcp.servers.Stash]
+        command = "uvx"
+        args = ["run", "stash-mcp"]
+
+        [mcp.servers.Stash.env]
+        STASH_ENDPOINT = "http://localhost:9999"
+        """,
+    )
+
+    assert warnings == ()
+
+
+@pytest.mark.asyncio
+async def test_warning_reaches_the_server_info() -> None:
+    manager = MCPManager(
+        MCPConfig(
+            enabled=True,
+            servers=(
+                replace(
+                    entry(),
+                    command="podman",
+                    args=("run", "-i", "img"),
+                    env={"STASH_ENDPOINT": "http://x"},
+                ),
+            ),
+        ),
+        ToolRegistry(),
+    )
+
+    info = manager.servers()[0]
+
+    assert len(info.warnings) == 1
+    assert "STASH_ENDPOINT" in info.warnings[0]

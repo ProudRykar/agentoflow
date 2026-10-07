@@ -556,7 +556,9 @@ def test_evidence_selection_is_cheap_for_a_large_crawl() -> None:
         for index in range(40)
     )
 
-    message = assembler._select_evidence(crawled, 2_000)
+    message, _dropped = assembler._select_evidence(
+        crawled, 2_000
+    )
 
     assert message is not None
     assert len(message["content"]) < 40_000

@@ -67,13 +67,19 @@ export class SessionSocket {
         return
       }
 
+      // The snapshot is not part of the event stream: it carries the
+      // last replayed seq, so the duplicate check below threw it away
+      // and the run state it describes was never applied after a
+      // re-entry. It has to be delivered even so.
       if (typeof parsed.seq === 'number') {
+        const isSnapshot = parsed.type === 'session.snapshot'
+
         // Ignore duplicates that a replay may re-deliver.
-        if (parsed.seq <= this.cursor) {
+        if (!isSnapshot && parsed.seq <= this.cursor) {
           return
         }
 
-        this.cursor = parsed.seq
+        this.cursor = Math.max(this.cursor, parsed.seq)
       }
 
       this.handlers.onEvent(parsed)
